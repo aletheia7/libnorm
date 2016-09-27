@@ -438,6 +438,8 @@ class NormSession
         }
         
         double SenderGrtt() const {return grtt_advertised;}
+        void ResetGrttNotification() 
+            {notify_on_grtt_update = true;}
         void SenderSetGrtt(double grttValue)
         {
             if (IsSender())
@@ -492,7 +494,10 @@ class NormSession
         void DeleteRemoteSender(NormSenderNode& senderNode);
         
         // Call this to do remote sender memory allocations ahead of time
-        bool PreallocateRemoteSender(UINT16 segmentSize, UINT16 numData, UINT16 numParity);
+        bool PreallocateRemoteSender(UINT16         segmentSize, 
+                                     UINT16         numData, 
+                                     UINT16         numParity, 
+                                     unsigned int   streamBufferSize = 0);
         
         void ReceiverSetUnicastNacks(bool state) {unicast_nacks = state;}
         bool ReceiverGetUnicastNacks() const {return unicast_nacks;}
@@ -784,6 +789,9 @@ class NormSession
         NormObject::NackingMode         default_nacking_mode;
         NormSenderNode::SyncPolicy      default_sync_policy;
         UINT16                          rx_cache_count_max;
+        
+        // API-specific state variables
+        bool                            notify_on_grtt_update;
         
         // State for some experimental congestion control
         bool                            ecn_ignore_loss;  

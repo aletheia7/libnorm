@@ -1461,9 +1461,9 @@ void NormApp::OnInputReady()
                 if (input_active)
                 {
 #ifdef WIN32
-                        ASSERT(0);  // no Win32 support for stream i/o yet
+                    ASSERT(0);  // no Win32 support for stream i/o yet
 #else
-                        dispatcher.RemoveGenericInput(fileno(input));
+                    dispatcher.RemoveGenericInput(fileno(input));
 #endif // if/else WIN32/UNIX
                     input_active = false;   
                 }
@@ -2173,6 +2173,8 @@ bool NormApp::OnStartup(int argc, const char*const* argv)
             session->SetMulticastInterface(interface_name);
         
         session->SetEcnSupport(ECN_OFF != ecn_mode, ECN_ONLY == ecn_mode, tolerate_loss);
+        
+        session->SetFlowControl(0.0); // TBD - make this command-line controllable
         
         if (msg_test || input || !tx_file_list.IsEmpty())
         {

@@ -1596,18 +1596,16 @@ void NormSetGrttEstimate(NormSessionHandle sessionHandle,
 NORM_API_LINKAGE
 double NormGetGrttEstimate(NormSessionHandle sessionHandle)
 {
-    NormInstance* instance = NormInstance::GetInstanceFromSession(sessionHandle);
-    if (instance && instance->dispatcher.SuspendThread())
+    if (NORM_SESSION_INVALID != sessionHandle)
     {
         NormSession* session = (NormSession*)sessionHandle;
-        if (session) session->SenderGrtt();
-        instance->dispatcher.ResumeThread();
+        session->ResetGrttNotification();
+        return (session->SenderGrtt());
     }
-    
-    if (NORM_SESSION_INVALID != sessionHandle)
-        return (((NormSession*)sessionHandle)->SenderGrtt());
     else
+    {
         return -1.0;
+    }
 }  // end NormGetGrttEstimate()
 
 NORM_API_LINKAGE
@@ -1803,6 +1801,8 @@ NORM_API_LINKAGE
 unsigned int NormGetStreamBufferSegmentCount(unsigned int bufferBytes, UINT16 segmentSize, UINT16 blockSize)
 {
     // This same computation is performed in NormStreamObject::Open() in "normObject.cpp"
+    // (Note the number of stream buffer segments is always smaller than the 
+    //  blockSize*pending_mask.GetSize())
     unsigned int numBlocks = bufferBytes / (blockSize * segmentSize);
     if (numBlocks < 2) numBlocks = 2; // NORM enforces a 2-block minimum buffer size
     return (numBlocks * blockSize);
@@ -1820,12 +1820,14 @@ unsigned int NormStreamWrite(NormObjectHandle   streamHandle,
     //       (i.e. in any case where immediate data send action may be invoked)
     unsigned int result = 0;
     NormInstance* instance = NormInstance::GetInstanceFromObject(streamHandle);
-    if (instance && instance->dispatcher.SuspendThread())
+    //if (instance && instance->dispatcher.SuspendThread())
+    if (instance && instance->dispatcher.SignalThread())
     {
         NormStreamObject* stream = 
             static_cast<NormStreamObject*>((NormObject*)streamHandle);
         result = stream->Write(buffer, numBytes, false);
-        instance->dispatcher.ResumeThread();
+        //instance->dispatcher.ResumeThread();
+        instance->dispatcher.UnsignalThread();
     }
     return result;
 }  // end NormStreamWrite()
@@ -1836,7 +1838,8 @@ void NormStreamFlush(NormObjectHandle streamHandle,
                      NormFlushMode    flushMode)
 {
     NormInstance* instance = NormInstance::GetInstanceFromObject(streamHandle);
-    if (instance && instance->dispatcher.SuspendThread())
+    //if (instance && instance->dispatcher.SuspendThread())
+    if (instance && instance->dispatcher.SignalThread())
     {
         NormStreamObject* stream = 
             static_cast<NormStreamObject*>((NormObject*)streamHandle);
@@ -1844,7 +1847,8 @@ void NormStreamFlush(NormObjectHandle streamHandle,
         stream->SetFlushMode((NormStreamObject::FlushMode)flushMode);
         stream->Flush(eom);
         stream->SetFlushMode(saveFlushMode);
-        instance->dispatcher.ResumeThread();
+        //instance->dispatcher.ResumeThread();
+        instance->dispatcher.UnsignalThread();
     }
 }  // end NormStreamFlush()
 
@@ -2291,6 +2295,24 @@ void NormNodeSetRxRobustFactor(NormNodeHandle   nodeHandle,
 }  // end NormNodeSetRxRobustFactor()
 
 NORM_API_LINKAGE
+bool NormPreallocateRemoteSender(NormSessionHandle  sessionHandle,
+                                 UINT16             segmentSize, 
+                                 UINT16             numData, 
+                                 UINT16             numParity,
+                                 unsigned int       streamBufferSize)
+{
+    bool result = false;
+    NormInstance* instance = NormInstance::GetInstanceFromSession(sessionHandle);
+    if (instance && instance->dispatcher.SuspendThread())
+    {
+        NormSession* session = (NormSession*)sessionHandle;
+        result = session->PreallocateRemoteSender(segmentSize, numData, numParity, streamBufferSize);
+        instance->dispatcher.ResumeThread();
+    }
+    return result;
+}  // end NormPreallocateRemoteSender()
+
+NORM_API_LINKAGE
 bool NormStreamRead(NormObjectHandle   streamHandle,
                     char*              buffer,
                     unsigned int*      numBytes)
@@ -2623,6 +2645,7 @@ double NormNodeGetGrtt(NormNodeHandle nodeHandle)
     if ((NULL != node) && (NormNode::SENDER == node->GetType()))
     {
         NormSenderNode* sender = static_cast<NormSenderNode*>(node);
+        sender->ResetGrttNotification();
         return sender->GetGrttEstimate();
     }
     else

@@ -646,6 +646,13 @@ NORM_API_LINKAGE
 void NormNodeSetRxRobustFactor(NormNodeHandle   remoteSender,
                                int              robustFactor);
 
+NORM_API_LINKAGE
+bool NormPreallocateRemoteSender(NormSessionHandle  sessionHandle,
+                                 UINT16             segmentSize, 
+                                 UINT16             numData, 
+                                 UINT16             numParity,
+                                 unsigned int       streamBufferSize = 0);
+
 NORM_API_LINKAGE 
 bool NormStreamRead(NormObjectHandle   streamHandle,
                     char*              buffer,

@@ -44,16 +44,32 @@ class NormObject
         
         // This must be reset after each update
         void SetNotifyOnUpdate(bool state)
-        {
-            notify_on_update = state;
-        }
+            {notify_on_update = state;}
         
         // Object information
         NormObject::Type GetType() const {return type;}
         const NormObjectId& GetId() const {return transport_id;}  
         const NormObjectSize& GetSize() const {return object_size;}
+        
+        void SetId(const NormObjectId transportId)
+            {transport_id = transportId;}
+        
+        
+        UINT16 GetSegmentSize() const {return segment_size;}
+        UINT8 GetFecId() const {return fec_id;}
+        UINT16 GetFecMaxBlockLen() const {return ndata;}
+        UINT16 GetFecNumParity() const {return nparity;}
+        UINT8 GetFecFieldSize() const {return fec_m;}
+        
         bool HaveInfo() const {return (info_len > 0);}
         bool HasInfo() const {return (NULL != info_ptr);}
+        void ClearInfo()
+        {
+            if (NULL != info_ptr) delete[] info_ptr;
+            info_ptr = NULL;
+            info_len = 0;
+            pending_info = false;
+        }
         
         const char* GetInfo() const {return info_ptr;}
         UINT16 GetInfoLength() const {return info_len;}
@@ -93,8 +109,6 @@ class NormObject
                         segmentSize, fecId, fecM, numData, numParity);
         }
         void Close();
-        
-        
         
         virtual bool WriteSegment(NormBlockId   blockId, 
                                   NormSegmentId segmentId, 
@@ -458,6 +472,11 @@ class NormStreamObject : public NormObject
             StreamUpdateStatus(blockId);
         }
         bool StreamAdvance();
+        
+        NormBlockId GetSyncId() const
+            {return stream_sync_id;}
+        NormBlockId GetNextId() const
+            {return stream_next_id;}
         
         virtual bool WriteSegment(NormBlockId   blockId, 
                                   NormSegmentId segmentId, 

@@ -60,7 +60,7 @@ NormSession::NormSession(NormSessionMgr& sessionMgr, NormNodeId localNodeId)
    receiver_silent(false), rcvr_ignore_info(false), rcvr_max_delay(-1), rcvr_realtime(false),
    default_repair_boundary(NormSenderNode::BLOCK_BOUNDARY),
    default_nacking_mode(NormObject::NACK_NORMAL), default_sync_policy(NormSenderNode::SYNC_CURRENT),
-   rx_cache_count_max(DEFAULT_RX_CACHE_MAX),
+   rx_cache_count_max(DEFAULT_RX_CACHE_MAX), notify_on_grtt_update(true),
    ecn_ignore_loss(false),
    trace(false), tx_loss_rate(0.0), rx_loss_rate(0.0),
    user_data(NULL), next(NULL)
@@ -636,7 +636,11 @@ void NormSession::SetTxRateInternal(double txRate)
                     LocalNodeId(), 
                     (grttQuantizedOld < grtt_quantized) ? "increased" : "decreased",
                     grtt_advertised);
-            Notify(NormController::GRTT_UPDATED, (NormSenderNode*)NULL, (NormObject*)NULL);
+            if (notify_on_grtt_update)
+            {
+                notify_on_grtt_update = false;
+                Notify(NormController::GRTT_UPDATED, (NormSenderNode*)NULL, (NormObject*)NULL);
+            }
         }
         // wakeup grtt/cc probing if necessary
         if (probe_reset)
@@ -960,9 +964,10 @@ void NormSession::DeleteRemoteSender(NormSenderNode& senderNode)
     senderNode.Release();
 }  // end NormSession::DeleteRemoteSender()
 
-bool NormSession::PreallocateRemoteSender(UINT16 segmentSize, 
-                                          UINT16 numData, 
-                                          UINT16 numParity)
+bool NormSession::PreallocateRemoteSender(UINT16        segmentSize, 
+                                          UINT16        numData, 
+                                          UINT16        numParity,
+                                          unsigned int  streamBufferSize)
 {
     if (NULL != preset_sender) delete preset_sender;
     preset_sender = new NormSenderNode(*this, NORM_NODE_ANY);
@@ -985,13 +990,22 @@ bool NormSession::PreallocateRemoteSender(UINT16 segmentSize,
     {
         fecId = 5;
     }
-    
     if (!preset_sender->AllocateBuffers(fecId, 0, fecM, segmentSize, numData, numParity))
     {
         PLOG(PL_ERROR, "NormSession::PreallocateRemoteSender() error: buffer allocation failure!\n");
         delete preset_sender;
         preset_sender = NULL;
         return false;
+    }
+    if (0 != streamBufferSize)
+    {
+        if (!preset_sender->PreallocateRxStream(streamBufferSize, segmentSize, numData, numParity))
+        {
+            PLOG(PL_ERROR, "NormSession::PreallocateRemoteSender() error: preset_stream allocation failure!\n");
+            delete preset_sender;
+            preset_sender = NULL;
+            return false;
+        }
     }
     return true;
 }  // end NormSession::PreallocateRemoteSender()
@@ -1637,8 +1651,7 @@ void NormSession::QueueMessage(NormMsg* msg)
         tx_timer.SetInterval(0.0);
         ActivateTimer(tx_timer);   
     }
-    if (msg) 
-        message_queue.Append(msg);
+    if (NULL != msg) message_queue.Append(msg);
 }  // end NormSesssion::QueueMessage(NormMsg& msg)
 
 
@@ -2391,21 +2404,21 @@ void NormTrace(const struct timeval&    currentTime,
             {
                 UINT32 offset = NormDataMsg::ReadStreamPayloadOffset(data.GetPayload());
                 PLOG(PL_ALWAYS, "offset>%lu ", offset);
-            }
-            /*
-            if (data.IsData() && data.IsStream())
-            {
-                //if (NormDataMsg::StreamPayloadFlagIsSet(data.GetPayload(), NormDataMsg::FLAG_MSG_START))
-                UINT16 msgStartOffset = NormDataMsg::ReadStreamPayloadMsgStart(data.GetPayload());
-                if (0 != msgStartOffset)
+            
+                /*if (data.GetFecSymbolId(fecM) < 32)
                 {
-                    PLOG(PL_ALWAYS, "start word>%hu ", msgStartOffset - 1);
+                    //if (NormDataMsg::StreamPayloadFlagIsSet(data.GetPayload(), NormDataMsg::FLAG_MSG_START))
+                    UINT16 msgStartOffset = NormDataMsg::ReadStreamPayloadMsgStart(data.GetPayload());
+                    if (0 != msgStartOffset)
+                    {
+                        PLOG(PL_ALWAYS, "start word>%hu ", msgStartOffset - 1);
+                    }
+                    //if (NormDataMsg::StreamPayloadFlagIsSet(data.GetPayload(), NormDataMsg::FLAG_STREAM_END))
+                    if (0 == NormDataMsg::ReadStreamPayloadLength(data.GetPayload()))
+                        PLOG(PL_ALWAYS, "(stream end) ");
                 }
-                //if (NormDataMsg::StreamPayloadFlagIsSet(data.GetPayload(), NormDataMsg::FLAG_STREAM_END))
-                if (0 == NormDataMsg::ReadStreamPayloadLength(data.GetPayload()))
-                    PLOG(PL_ALWAYS, "(stream end) ");
+                */
             }
-            */
             break;
         }
         case NormMsg::CMD:
@@ -2532,39 +2545,38 @@ void NormSession::HandleReceiveMessage(NormMsg& msg, bool wasUnicast, bool ecnSt
     if (trace) 
     {
     	// Initially assume it's a message we generated (or similarly configured sender)
-    UINT8 fecM = fec_m;
-	UINT16 instId = instance_id;
-	NormNodeId senderId;
-	switch (msg.GetType())
-	{
-	    case NormMsg::ACK:
-	    	senderId = static_cast<NormAckMsg&>(msg).GetSenderId();
-		break;
-	    case NormMsg::NACK:
-	    	senderId = static_cast<NormAckMsg&>(msg).GetSenderId();
-		break;
-	    default:
-	    	senderId = msg.GetSourceId();
-		break;
-	}
-	if (IsReceiver() && (senderId != LocalNodeId()))
-	{
-	   // Use our receiver state to look up sender if possible
-	   NormSenderNode* sender = static_cast<NormSenderNode*>(sender_tree.FindNodeById(senderId));
-	   if (NULL != sender)
-	   {
-	       fecM = sender->GetFecFieldSize();
-	       instId = sender->GetInstanceId();
-	   }
-	   else
-	   {
-	   	fecM = 16; // reasonable assumption
-		instId = 0;
-	   }
-	}
-	
+        UINT8 fecM = fec_m;
+	    UINT16 instId = instance_id;
+	    NormNodeId senderId;
+	    switch (msg.GetType())
+	    {
+	        case NormMsg::ACK:
+	    	    senderId = static_cast<NormAckMsg&>(msg).GetSenderId();
+		    break;
+	        case NormMsg::NACK:
+	    	    senderId = static_cast<NormAckMsg&>(msg).GetSenderId();
+		    break;
+	        default:
+	    	    senderId = msg.GetSourceId();
+		    break;
+	    }
+	    if (IsReceiver() && (senderId != LocalNodeId()))
+	    {
+            // Use our receiver state to look up sender if possible
+            NormSenderNode* sender = static_cast<NormSenderNode*>(sender_tree.FindNodeById(senderId));
+            if (NULL != sender)
+            {
+                fecM = sender->GetFecFieldSize();
+                instId = sender->GetInstanceId();
+            }
+            else
+            {
+                fecM = 16; // reasonable assumption
+                instId = 0;
+            }
+	    }
     	NormTrace(currentTime, LocalNodeId(), msg, false, fecM, instId);  // TBD don't assume m == 16 (i.e. for fec_id == 2)
-    }
+    }  // end if (trace)
     
     NormMsg::Type msgType = msg.GetType();
     
@@ -2670,16 +2682,16 @@ void NormSession::ReceiverHandleObjectMessage(const struct timeval&   currentTim
             theSender = preset_sender;
             preset_sender = NULL;
             theSender->SetId(msg.GetSourceId());
-            theSender->SetAddress(msg.GetSource());
             theSender->SetInstanceId(msg.GetInstanceId());
+            theSender->SetAddress(msg.GetSource());
             sender_tree.AttachNode(theSender);
             PLOG(PL_DEBUG, "NormSession::ReceiverHandleObjectMessage() node>%lu new remote sender:%lu ...\n",
                            LocalNodeId(), msg.GetSourceId());
+            Notify(NormController::REMOTE_SENDER_NEW, theSender, NULL);
         }
         else if (NULL != (theSender = new NormSenderNode(*this, msg.GetSourceId())))
         {
             theSender->SetAddress(msg.GetSource());
-            Notify(NormController::REMOTE_SENDER_NEW, theSender, NULL);
             if (theSender->Open(msg.GetInstanceId()))
             {
                 sender_tree.AttachNode(theSender);
@@ -2691,7 +2703,8 @@ void NormSession::ReceiverHandleObjectMessage(const struct timeval&   currentTim
                 PLOG(PL_FATAL, "NormSession::ReceiverHandleObjectMessage() node>%lu error opening NormSenderNode\n");
                 // (TBD) notify application of error
                 return;    
-            }            
+            } 
+            Notify(NormController::REMOTE_SENDER_NEW, theSender, NULL);
         }
         else
         {
@@ -2755,10 +2768,10 @@ void NormSession::ReceiverHandleCommand(const struct timeval& currentTime,
             sender_tree.AttachNode(theSender);
             PLOG(PL_DEBUG, "NormSession::ReceiverHandleObjectMessage() node>%lu new remote sender:%lu ...\n",
                            LocalNodeId(), cmd.GetSourceId());
+            Notify(NormController::REMOTE_SENDER_NEW, theSender, NULL);
         }
         else if ((theSender = new NormSenderNode(*this, cmd.GetSourceId())))
         {
-            Notify(NormController::REMOTE_SENDER_NEW, theSender, NULL);
             theSender->SetAddress(cmd.GetSource());
             if (theSender->Open(cmd.GetInstanceId()))
             {
@@ -2772,6 +2785,7 @@ void NormSession::ReceiverHandleCommand(const struct timeval& currentTime,
                 // (TBD) notify application of error
                 return;
             }
+            Notify(NormController::REMOTE_SENDER_NEW, theSender, NULL);
         }
         else
         {
@@ -2859,6 +2873,11 @@ void NormSession::SenderUpdateGrttEstimate(double receiverRtt)
         grtt_current_peak = grtt_measured;
         if (grttQuantizedOld != grtt_quantized)
         {
+            if (notify_on_grtt_update)
+            {
+                notify_on_grtt_update = false;
+                Notify(NormController::GRTT_UPDATED, (NormSenderNode*)NULL, (NormObject*)NULL);
+            }
             Notify(NormController::GRTT_UPDATED, (NormSenderNode*)NULL, (NormObject*)NULL);
             PLOG(PL_DEBUG, "NormSession::SenderUpdateGrttEstimate() node>%lu increased to new grtt>%lf sec\n",
                     LocalNodeId(), grtt_advertised);
@@ -4458,7 +4477,7 @@ NormSession::MessageStatus NormSession::SendMessage(NormMsg& msg)
     msg.SetSourceId(local_node_id);
     UINT16 msgSize = msg.GetLength();
     // Possibly drop some tx messages for testing purposes
-    bool drop = (UniformRand(100.0) < tx_loss_rate);
+    bool drop = (tx_loss_rate > 0.0) ? (UniformRand(100.0) < tx_loss_rate) : false;
     
     if (isReceiverMsg && receiver_silent)
     {
@@ -5011,8 +5030,15 @@ void NormSession::AdjustRate(bool onResponse)
     if (txRate != tx_rate) 
     {
         if (cc_adjust) SetTxRateInternal(txRate);
-        posted_tx_rate_changed = true;
-        Notify(NormController::TX_RATE_CHANGED, (NormSenderNode*)NULL, (NormObject*)NULL);
+        if (!posted_tx_rate_changed)
+        {
+            // TBD - make API notification filtering more consistent
+            // (e.g., "notify_on_rate_update" like for grtt, etc
+            //  putting API code in charge of resetting these API
+            //  state variables).
+            posted_tx_rate_changed = true;
+            Notify(NormController::TX_RATE_CHANGED, (NormSenderNode*)NULL, (NormObject*)NULL);
+        }
     }
     
     struct timeval currentTime;
@@ -5052,20 +5078,21 @@ bool NormSession::OnReportTimeout(ProtoTimer& /*theTimer*/)
     
 #endif // if/else _WIN32_WCE
     ASSERT(NULL != ct);
-    PLOG(PL_INFO, "REPORT time>%02d:%02d:%02d.%06lu node>%lu ***************************************\n", 
-                  ct->tm_hour, ct->tm_min, ct->tm_sec, currentTime.tv_usec, LocalNodeId());
+    ProtoDebugLevel reportDebugLevel = PL_INFO;
+    PLOG(reportDebugLevel, "REPORT time>%02d:%02d:%02d.%06lu node>%lu ***************************************\n", 
+                  ct->tm_hour, ct->tm_min, ct->tm_sec, currentTime.tv_usec, (unsigned long)LocalNodeId());
     if (IsSender())
     {
-        PLOG(PL_INFO, "Local status:\n");
+        PLOG(reportDebugLevel, "Local status:\n");
         double sentRate = 8.0e-03*sent_accumulator.GetScaledValue(1.0 / report_timer.GetInterval());  // kbps
         sent_accumulator.Reset();
-        PLOG(PL_INFO, "   txRate>%9.3lf kbps sentRate>%9.3lf grtt>%lf\n", 
+        PLOG(reportDebugLevel, "   txRate>%9.3lf kbps sentRate>%9.3lf grtt>%lf\n", 
                 8.0e-03*tx_rate, sentRate, grtt_advertised);
         if (cc_enable)
         {
             const NormCCNode* clr = (const NormCCNode*)cc_node_list.Head(); 
             if (clr)  
-                PLOG(PL_INFO, "   clr>%lu rate>%9.3lf rtt>%lf loss>%lf %s\n", clr->GetId(),
+                PLOG(reportDebugLevel, "   clr>%lu rate>%9.3lf rtt>%lf loss>%lf %s\n", clr->GetId(),
                      8.0e-03*clr->GetRate(), clr->GetRtt(), clr->GetLoss(), cc_slow_start ? "(slow_start)" : "");
         }   
     }
@@ -5075,27 +5102,36 @@ bool NormSession::OnReportTimeout(ProtoTimer& /*theTimer*/)
         NormSenderNode* next;
         while ((next = (NormSenderNode*)iterator.GetNextNode()))
         {
-            PLOG(PL_INFO, "Remote sender>%lu\n", next->GetId());
+            PLOG(reportDebugLevel, "Remote sender>%lu\n", next->GetId());
             double rxRate = 8.0e-03*next->GetRecvRate(report_timer.GetInterval()); // kbps
             double rxGoodput = 8.0e-03*next->GetRecvGoodput(report_timer.GetInterval()); // kbps
             next->ResetRecvStats();
-            PLOG(PL_INFO, "   rxRate>%9.3lf kbps rx_goodput>%9.3lf kbps\n", rxRate, rxGoodput);
-            PLOG(PL_INFO, "   rxObjects> completed>%lu pending>%lu failed>%lu\n", 
+            PLOG(reportDebugLevel, "   rxRate>%9.3lf kbps rx_goodput>%9.3lf kbps\n", rxRate, rxGoodput);
+            PLOG(reportDebugLevel, "   rxObjects> completed>%lu pending>%lu failed>%lu\n", 
                     next->CompletionCount(), next->PendingCount(), next->FailureCount());
-            PLOG(PL_INFO, "   fecBufferUsage> current>%lu peak>%lu overuns>%lu\n", next->CurrentBufferUsage(),
+            PLOG(reportDebugLevel, "   fecBufferUsage> current>%lu peak>%lu overuns>%lu\n", next->CurrentBufferUsage(),
                                                                             next->PeakBufferUsage(), 
                                                                             next->BufferOverunCount());
-            PLOG(PL_INFO, "   strBufferUsage> current>%lu peak>%lu overuns>%lu\n", next->CurrentStreamBufferUsage(),
+            PLOG(reportDebugLevel, "   strBufferUsage> current>%lu peak>%lu overuns>%lu\n", next->CurrentStreamBufferUsage(),
                                                                             next->PeakStreamBufferUsage(), 
                                                                             next->StreamBufferOverunCount());
-            PLOG(PL_INFO, "   resyncs>%lu nacks>%lu suppressed>%lu\n", 
+            PLOG(reportDebugLevel, "   resyncs>%lu nacks>%lu suppressed>%lu\n", 
                      next->ResyncCount() ? next->ResyncCount() - 1 : 0,  // "ResyncCount()" is reall "SyncCount()"
                      next->NackCount(), 
                      next->SuppressCount());
+            // Some stream status for current receive stream (if applicable)
+            NormObject* obj = next->GetNextPendingObject();
+            if ((NULL != obj) && obj->IsStream())
+            {
+                NormStreamObject* stream = (NormStreamObject*)obj;
+                PLOG(reportDebugLevel, "   stream_sync_id>%u stream_next_id>%u read_index:%u.%hu\n",
+                              (UINT32)stream->GetSyncId(), (UINT32)stream->GetNextId(), 
+                              (UINT32)stream->GetNextBlockId(), (UINT16)stream->GetNextSegmentId());
+            }
                     
         }
     }  // end if (IsReceiver())
-    PLOG(PL_INFO, "***************************************************************************\n");
+    PLOG(reportDebugLevel, "***************************************************************************\n");
     return true;
 }  // end NormSession::OnReportTimeout()
 

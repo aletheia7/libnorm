@@ -134,6 +134,8 @@ class NormObjectSize
         // Operators
         bool operator==(const NormObjectSize& b) const
             {return (b.size == size);}
+        bool operator!=(const NormObjectSize& b) const
+            {return (b.size != size);}
         NormObjectSize operator+(const NormObjectSize& b) const
         {
             NormObjectSize result(size);
@@ -249,7 +251,7 @@ class NormBlockId
         }
         
         
-        NormBlockId& operator++(int ) {value++; return *this;}
+        NormBlockId& operator++(int) {value++; return *this;}
         
     private:
         UINT32  value;  
@@ -732,6 +734,51 @@ class NormFtiExtension2 : public NormHeaderExtension
             FEC_NPARITY_OFFSET  = ((FEC_NDATA_OFFSET*2)+2)/2
         };  
 };  // end class NormFtiExtension2
+
+// Helper class for containing key FTI params
+class NormFtiData
+{
+    public:
+        NormFtiData()
+          : object_size(NormObjectSize(0)), segment_size(0),
+            num_data(0), num_parity(0), fec_m(0), instance_id(0) {}
+        ~NormFtiData() {}
+        
+        void SetObjectSize(const NormObjectSize& objectSize)
+            {object_size = objectSize;}
+        void SetSegmentSize(UINT16 segmentSize)
+            {segment_size = segmentSize;}
+        void SetFecMaxBlockLen(UINT16 numData)
+            {num_data = numData;}
+        void SetFecNumParity(UINT16 numParity)
+            {num_parity = numParity;}
+        void SetFecFieldSize(UINT8 fecM)
+            {fec_m = fecM;}
+        void SetFecInstanceId(UINT16 instanceId)
+            {instance_id = instanceId;}
+        
+        const NormObjectSize& GetObjectSize() const 
+            {return object_size;}
+        UINT16 GetSegmentSize() const
+            {return segment_size;}
+        UINT16 GetFecMaxBlockLen() const
+            {return num_data;}
+        UINT16 GetFecNumParity() const
+            {return num_parity;}
+        UINT8 GetFecFieldSize() const
+            {return fec_m;}
+        UINT16 GetFecInstanceId() const
+            {return instance_id;}
+        
+    private:
+        NormObjectSize  object_size;
+        UINT16          segment_size;
+        UINT16          num_data;
+        UINT16          num_parity;
+        UINT8           fec_m;
+        UINT16          instance_id;
+        
+};  // end class NormFtiData
 
 
 // This FEC Object Transmission Information assumes "fec_id" == 5 (RFC 5510)

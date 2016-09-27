@@ -132,13 +132,17 @@ class NormMsgr
         // Sender methods
         FILE* GetInputFile() const
             {return input_file;}
+        bool InputReady() const
+            {return input_ready;}
+        void SetInputReady()
+            {input_ready = true;}
         bool InputNeeded() const
             {return input_needed;}
         bool InputMessageReady() const
             {return ((NULL != input_msg) && !input_needed);}
         bool ReadInput();
         
-        bool NormTxReady() const;
+        bool TxReady() const;
         bool SendMessage();
         bool EnqueueMessageObject();
         
@@ -164,7 +168,8 @@ class NormMsgr
             
     private:
         bool                is_running;                                                  
-        FILE*               input_file;      // stdin by default                         
+        FILE*               input_file;      // stdin by default  
+        bool                input_ready;                       
         bool                input_needed;    //                                          
         Message*            input_msg;       // current input message being read/sent*   
         MessageQueue        input_msg_list;  // list of enqueued messages (in norm sender cache)
@@ -190,7 +195,7 @@ class NormMsgr
 };  // end class NormMsgr
 
 NormMsgr::NormMsgr()
- : input_file(stdin), input_needed(false), input_msg(NULL),
+ : input_file(stdin), input_ready(false), input_needed(false), input_msg(NULL),
    norm_session(NORM_SESSION_INVALID), is_multicast(false), norm_tx_queue_max(2048), norm_tx_queue_count(0), 
    norm_tx_watermark_pending(false), norm_tx_vacancy(true), norm_acking(false),
    output_file(stdout), output_ready(true), output_pending(false), output_msg(NULL), 
@@ -295,7 +300,7 @@ bool NormMsgr::Start(bool sender, bool receiver)
         gettimeofday(&currentTime, NULL);
         srand(currentTime.tv_usec);  // seed random number generator
         NormSessionId instanceId = (NormSessionId)rand();
-        if (!NormStartSender(norm_session, instanceId, 10*1024*1024, 1400, 16, 4))
+        if (!NormStartSender(norm_session, instanceId, 10*1024*1024, 1400, 64, 0))
         {
             fprintf(stderr, "normMsgr error: unable to start NORM sender\n");
             if (receiver) NormStopReceiver(norm_session);
@@ -374,6 +379,7 @@ bool NormMsgr::ReadInput()
             {
                 // end-of-file reached, TBD - trigger final flushing and wrap-up
                 fprintf(stderr, "normMsgr: input end-of-file detected ...\n");
+                input_needed = false;
             }
             else if (ferror(input_file))
             {
@@ -389,6 +395,7 @@ bool NormMsgr::ReadInput()
                         break;
                 }
             }
+            input_ready = false;
             return false;
         }
     }  
@@ -462,7 +469,7 @@ bool NormMsgr::WriteOutput()
     return true;
 }  // end NormMsgr::WriteOutput()
 
-bool NormMsgr::NormTxReady() const
+bool NormMsgr::TxReady() const
 {
     // This returns true if new tx data can be enqueued to NORM
     // This is based on the state with respect to prior successful data
@@ -484,8 +491,6 @@ bool NormMsgr::NormTxReady() const
 
 bool NormMsgr::SendMessage()
 {
-    // TBD - call EnqueueMessageObject() or WriteMessageStream()
-    //       depending upon on configured mode
     if (EnqueueMessageObject())
     {
         // Our buffered message was sent, so reset input indices
@@ -877,79 +882,94 @@ int main(int argc, char* argv[])
     if (-1 == fcntl(inputfd, F_SETFL, fcntl(inputfd, F_GETFL, 0) | O_NONBLOCK))
         perror("normMsgr: fcntl(inputfd, O_NONBLOCK) error");
     int outputfd = fileno(normMsgr.GetOutputFile());
-    if (-1 == fcntl(outputfd, F_SETFL, fcntl(outputfd, F_GETFL, 0) | O_NONBLOCK))
-        perror("normMsgr: fcntl(outputfd, O_NONBLOCK) error");
+    //if (-1 == fcntl(outputfd, F_SETFL, fcntl(outputfd, F_GETFL, 0) | O_NONBLOCK))
+    //    perror("normMsgr: fcntl(outputfd, O_NONBLOCK) error");
     fd_set fdsetInput, fdsetOutput;
     FD_ZERO(&fdsetInput);
     FD_ZERO(&fdsetOutput);
     while (normMsgr.IsRunning())
     {
-        int maxfd = normfd;
-        FD_SET(normfd, &fdsetInput);
-        if (normMsgr.InputNeeded())
+        int maxfd = -1;
+        // Only wait on NORM if needed for tx readiness
+        bool waitOnNorm = true;
+        if (!(normMsgr.InputMessageReady()))
+            waitOnNorm = false; // no need to wait if nothing to tx
+        else if (normMsgr.InputMessageReady() && normMsgr.TxReady())  
+            waitOnNorm = false; // no need to wait if already tx ready
+        if (waitOnNorm)
+        {
+            maxfd = normfd;
+            FD_SET(normfd, &fdsetInput);
+        }
+        if (normMsgr.InputNeeded() && !normMsgr.InputReady())
         {   
             //fprintf(stderr, "NEED INPUT ...\n");
             FD_SET(inputfd, &fdsetInput);
-            if (inputfd > maxfd)
-                maxfd = inputfd;
+            if (inputfd > maxfd) maxfd = inputfd;
         }   
         else
         {
             FD_CLR(inputfd, &fdsetInput);
         }
-        int result;
         if (normMsgr.OutputPending() && !normMsgr.OutputReady())
         {
             FD_SET(outputfd, &fdsetOutput);
             if (outputfd > maxfd) maxfd = outputfd;
-            result = select(maxfd+1, &fdsetInput, &fdsetOutput, NULL, NULL);
         }
         else
         {   
             FD_CLR(outputfd, &fdsetOutput);
-            result = select(maxfd+1, &fdsetInput, NULL, NULL, NULL);
         }
-        switch (result)
+        if (maxfd >= 0)
         {
-            case -1:
-                switch (errno)
-                {
-                    case EINTR:
-                    case EAGAIN:
-                        continue;
-                    default:
-                        perror("normMsgr select() error");
-                        // TBD - stop NormMsgr
-                        break;
-                }
-                break;
-            case 0:
-                // shouldn't occur for now (no timeout)
-                continue;
-            default:
-                if (FD_ISSET(inputfd, &fdsetInput))
-                {
-                    normMsgr.ReadInput();
-                }   
-                if (FD_ISSET(normfd, &fdsetInput))
-                {
-                    NormEvent event;
-                    if (NormGetNextEvent(normInstance, &event))
-                        normMsgr.HandleNormEvent(event);
-                }   
-                if (FD_ISSET(outputfd, &fdsetOutput))
-                {
-                    normMsgr.SetOutputReady();
-                }
-                break; 
+            int result = select(maxfd+1, &fdsetInput, &fdsetOutput, NULL, NULL);
+            switch (result)
+            {
+                case -1:
+                    switch (errno)
+                    {
+                        case EINTR:
+                        case EAGAIN:
+                            continue;
+                        default:
+                            perror("normMsgr select() error");
+                            // TBD - stop NormMsgr
+                            break;
+                    }
+                    break;
+                case 0:
+                    // shouldn't occur for now (no timeout)
+                    continue;
+                default:
+                    if (FD_ISSET(inputfd, &fdsetInput))
+                    {
+                        normMsgr.SetInputReady();
+                    }   
+                    /*if (FD_ISSET(normfd, &fdsetInput))
+                    {
+                        NormEvent event;
+                        while (NormGetNextEvent(normInstance, &event, false))
+                            normMsgr.HandleNormEvent(event);
+                    }*/  
+                    if (FD_ISSET(outputfd, &fdsetOutput))
+                    {
+                        normMsgr.SetOutputReady();
+                    }
+                    break; 
+            }
         }
+        NormEvent event;
+        while (NormGetNextEvent(normInstance, &event, false))
+            normMsgr.HandleNormEvent(event);
         // As a result of reading input or NORM notification events,  
-        // we may be ready to send a message if it's been read
-        if (normMsgr.InputMessageReady() && normMsgr.NormTxReady())
+        // we may be ready to read input and/or send a message if it's been read
+        if (normMsgr.InputNeeded() && normMsgr.InputReady())
+            normMsgr.ReadInput();
+        if (normMsgr.InputMessageReady() && normMsgr.TxReady())
             normMsgr.SendMessage();
         // and/or output a received message if we need
         if (normMsgr.OutputPending() && normMsgr.OutputReady())
-            normMsgr.WriteOutput();  // TBD - implement output async i/o notification as needed
+            normMsgr.WriteOutput();  
             
     }  // end while(normMsgr.IsRunning()
     

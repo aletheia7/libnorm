@@ -694,7 +694,6 @@ int ProtoDispatcher::Run(bool oneShot)
             if (IsThreaded())
             {
                 Lock(signal_mutex);
-                
                 Unlock(suspend_mutex);
                 Wait();
                 Unlock(signal_mutex);
@@ -843,7 +842,8 @@ bool ProtoDispatcher::StartThread(bool                         priorityBoost,
 bool ProtoDispatcher::SignalThread()
 {
     SuspendThread();
-    if (IsThreaded() && !IsMyself())
+    ThreadId currentThread = GetCurrentThread();
+    if (IsThreaded() && (currentThread != thread_id))
     {
         if (signal_count > 0)
         {
@@ -892,7 +892,8 @@ bool ProtoDispatcher::SignalThread()
 
 void ProtoDispatcher::UnsignalThread()
 {
-    if (IsThreaded() && !IsMyself() && (thread_master == GetCurrentThread()))
+    ThreadId currentThread = GetCurrentThread();
+    if (IsThreaded() && (currentThread != thread_id) && (thread_master == currentThread))
     {
         ASSERT(0 != signal_count);
         signal_count--;
@@ -904,9 +905,10 @@ void ProtoDispatcher::UnsignalThread()
 
 bool ProtoDispatcher::SuspendThread()
 {
-    if (IsThreaded() && !IsMyself())
+    ThreadId currentThread = GetCurrentThread();
+    if (IsThreaded() && (currentThread != thread_id))
     {
-        if (GetCurrentThread() == thread_master)
+        if (currentThread == thread_master)
         {
             suspend_count++;
             return true;   
@@ -915,7 +917,7 @@ bool ProtoDispatcher::SuspendThread()
         // (TBD) use a spin_count to limit iterations as safeguard
         while (!thread_started);
         Lock(suspend_mutex);  // TBD - check result of "Lock()" 
-        thread_master = GetCurrentThread();
+        thread_master = currentThread;
         suspend_count = 1;
     }
     return true;
@@ -923,9 +925,10 @@ bool ProtoDispatcher::SuspendThread()
 
 void ProtoDispatcher::ResumeThread()
 {
-    if (IsThreaded() && !IsMyself())
+    ThreadId currentThread = GetCurrentThread();
+    if (IsThreaded() && (currentThread != thread_id))
     {
-        if (GetCurrentThread() == thread_master)
+        if (currentThread == thread_master)
         {
             if (suspend_count > 1)
             {
@@ -1611,7 +1614,7 @@ LRESULT CALLBACK ProtoDispatcher::MessageHandler(HWND hwnd, UINT message, WPARAM
 #endif // WIN32
 
 /**
- * UNIX ProtoDispatcher::Controller implementation
+ *  ProtoDispatcher::Controller implementation
  */
 ProtoDispatcher::Controller::Controller(ProtoDispatcher& theDispatcher)
  : dispatcher(theDispatcher), use_lock_a(true)

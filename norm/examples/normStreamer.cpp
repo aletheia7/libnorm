@@ -12,6 +12,10 @@
 #include <fcntl.h>       // for, well, fnctl()
 #include <errno.h>       // obvious child
 #include <assert.h>      // embarrassingly obvious
+#include <sys/mman.h>    // Memory Lock.
+
+#define USE_FWRITE 0
+const unsigned int LOOP_MAX = 100;
 
 class NormStreamer
 {
@@ -27,6 +31,25 @@ class NormStreamer
             MSG_HEADER_SIZE = 2,    // Big Endian message length header size
             MSG_SIZE_MAX = 65535    // (including length header)  
         };  
+            
+        void SetLoopback(bool state)
+        {
+            loopback = state;
+            if (NORM_SESSION_INVALID != norm_session)
+                NormSetMulticastLoopback(norm_session, state);
+        }       
+        
+        bool EnableUdpRelay(const char* relayAddr, unsigned short relayPort);
+       	bool EnableUdpListener(unsigned short listenPort, const char* groupAddr, const char * interfaceName);
+        bool UdpListenerEnabled() const
+            {return input_socket.IsOpen();}
+        bool UdpRelayEnabled() const
+            {return output_socket.IsOpen();}
+        
+        int GetInputDescriptor() const
+            {return (input_socket.IsOpen() ? input_socket.GetHandle() : fileno(input_file));}
+        int GetOutputDescriptor() const
+            {return (output_socket.IsOpen() ? output_socket.GetHandle() : fileno(output_file));} 
             
         bool OpenNormSession(NormInstanceHandle instance, 
                              const char*        addr,
@@ -74,6 +97,7 @@ class NormStreamer
         bool InputNeeded() const
             {return input_needed;}
         void ReadInput();
+        void ReadInputSocket();
         bool TxPending() const
             {return (!input_needed && (input_index < input_msg_length));}
         bool TxReady() const
@@ -97,6 +121,7 @@ class NormStreamer
         bool OutputPending() const
             {return (!rx_needed && (output_index < output_msg_length));}
         void WriteOutput();
+        void WriteOutputSocket();
         
         void OmitHeader(bool state) 
             {omit_header = state;}
@@ -110,6 +135,7 @@ class NormStreamer
     private:
         NormSessionHandle   norm_session;
         bool                is_multicast;
+        bool                loopback;
         bool                is_running;     
                                                      
         // State variables for reading input messages for transmission
@@ -126,6 +152,7 @@ class NormStreamer
         bool                tx_ready;
         UINT16              tx_segment_size;
         unsigned int        tx_stream_buffer_max;
+        unsigned int        tx_stream_buffer_threshold; // flow control threshold
         unsigned int        tx_stream_buffer_count;
         unsigned int        tx_stream_bytes_remain;
         bool                tx_watermark_pending;
@@ -138,6 +165,7 @@ class NormStreamer
         bool                rx_needed;
         bool                msg_sync;
         ProtoSocket         output_socket;  // optional UDP socket for recv msg output
+        ProtoAddress        relay_addr;     // dest addr for recv msg relay
         FILE*               output_file;
         int                 output_fd;    // stdout by default
         bool                output_ready;
@@ -153,13 +181,13 @@ class NormStreamer
 };  // end class NormStreamer
 
 NormStreamer::NormStreamer()
- : norm_session(NORM_SESSION_INVALID), is_multicast(false), is_running(false),
+ : norm_session(NORM_SESSION_INVALID), is_multicast(false), loopback(false), is_running(false),
    input_socket(ProtoSocket::UDP), input_file(stdin), input_fd(fileno(stdin)), input_ready(true), 
    input_needed(false), input_msg_length(0), input_index(0),
    tx_stream (NORM_OBJECT_INVALID), tx_ready(true),  tx_segment_size(0), 
    tx_stream_buffer_max(0), tx_stream_buffer_count(0), tx_stream_bytes_remain(0), 
    tx_watermark_pending(false), norm_acking(false), flush_mode(NORM_FLUSH_ACTIVE),
-   rx_stream(NORM_OBJECT_INVALID), rx_ready(false), rx_needed(true), msg_sync(false),
+   rx_stream(NORM_OBJECT_INVALID), rx_ready(false), rx_needed(false), msg_sync(false),
    output_socket(ProtoSocket::UDP), output_file(stdout), output_fd(fileno(stdout)), output_ready(true), 
    output_msg_length(0), output_index(0), 
    omit_header(false)//, rx_silent(false), tx_loss(0.0)
@@ -170,6 +198,67 @@ NormStreamer::NormStreamer()
 NormStreamer::~NormStreamer()
 {
 }
+
+bool NormStreamer::EnableUdpRelay(const char* relayAddr, unsigned short relayPort)
+{
+    if (!output_socket.Open())
+    {
+        fprintf(stderr, "normStreamer output_socket open() error: %s\n", GetErrorString());
+        return false;
+    }
+    if (!relay_addr.ResolveFromString(relayAddr))
+    {
+        fprintf(stderr, "normStreamer error: invalid relay address\n");
+        return false;
+    }
+    relay_addr.SetPort(relayPort);  // TBD - validate port number??
+    return true;
+}  // end bool EnableUdpRelay()
+
+bool NormStreamer::EnableUdpListener(unsigned short listenPort, const char* groupAddr, const char * interfaceName)
+{
+	bool rval = true ;
+    if (!input_socket.Open(listenPort))
+    {
+        fprintf(stderr, "normStreamer input_socket open() error: %s\n", GetErrorString());
+		rval = false ;
+    }
+	else
+	{
+    if (NULL != groupAddr)
+    {
+        ProtoAddress addr;
+        if (!addr.ResolveFromString(groupAddr) || (!addr.IsMulticast()))
+        {
+            fprintf(stderr, "normStreamer error: invalid 'listen' group address\n");
+				rval = false ;
+        }
+			else
+			{
+				if (!input_socket.JoinGroup(addr, interfaceName))
+                {
+                    fprintf(stderr, "normStreamer input_socket JoinGroup() error: %s\n", GetErrorString());
+					        rval = false ;
+                }
+				else
+				{
+					fprintf(stderr, "%s:=>normStreamer joined group %s/%d on interface %s\n", __PRETTY_FUNCTION__,  groupAddr, listenPort, interfaceName) ;
+					uint32_t rxSockBufferSize = 64*1024*1024 ;
+					if ( input_socket.SetRxBufferSize(rxSockBufferSize))
+					{
+						fprintf(stderr, "normStreamer failed to set input socket buffer size (%d)\n", rxSockBufferSize);
+						rval = false ;
+                    }
+				}
+			}
+		}
+	}
+	if ( rval )
+	    fprintf(stderr, "%s:=>listening on port %d on socket %d\n", __PRETTY_FUNCTION__, listenPort, (int)input_socket.GetHandle());
+	else
+		fprintf(stderr, "%s:=>failed. listening on port %d on socket %d\n", __PRETTY_FUNCTION__, listenPort, (int)input_socket.GetHandle());
+	return rval;
+}  // end NormStreamer::EnableUdpListener()
 
 bool NormStreamer::OpenNormSession(NormInstanceHandle instance, const char* addr, unsigned short port, NormNodeId nodeId)
 {
@@ -183,12 +272,11 @@ bool NormStreamer::OpenNormSession(NormInstanceHandle instance, const char* addr
         fprintf(stderr, "normStreamer error: unable to create NORM session\n");
         return false;
     }
-    
     if (is_multicast)
     {
         NormSetRxPortReuse(norm_session, true);
-        // TBD - make full loopback a command line option?
-        NormSetMulticastLoopback(norm_session, true);
+        if (loopback)
+            NormSetMulticastLoopback(norm_session, true);
     }
     
     // Set some default parameters (maybe we should put parameter setting in Start())
@@ -196,7 +284,7 @@ bool NormStreamer::OpenNormSession(NormInstanceHandle instance, const char* addr
     
     NormSetDefaultUnicastNack(norm_session, true);
     
-    NormSetTxRobustFactor(norm_session, 2);
+    NormSetTxRobustFactor(norm_session, 20);
     
     return true;
 }  // end NormStreamer::OpenNormSession()
@@ -235,22 +323,29 @@ void NormStreamer::SetNormCongestionControl(CCMode ccMode)
 bool NormStreamer::Start(bool sender, bool receiver)
 {
     // TBD - make the NORM parameters command-line accessible
-    unsigned int bufferSize = 8*1024*1024;
+    unsigned int bufferSize = 256*1024*1024;
+    unsigned int segmentSize = 1400;
+    unsigned int blockSize = 64;
+    unsigned int numParity = 0;
+        
     if (receiver)
     {
-        if (!NormStartReceiver(norm_session, 2*bufferSize))
+        NormPreallocateRemoteSender(norm_session, segmentSize, blockSize, numParity, bufferSize);
+        if (!NormStartReceiver(norm_session, bufferSize))
         {
             fprintf(stderr, "normStreamer error: unable to start NORM receiver\n");
             return false;
         }
-        NormSetRxSocketBuffer(norm_session, 4*1024*1024);
+		if (0 != mlockall(MCL_CURRENT | MCL_FUTURE))
+		    fprintf(stderr, "normStreamer error: failed to lock memory for receiver.\n");
+        NormSetRxSocketBuffer(norm_session, 6*1024*1024);
+        rx_needed = true;
+        rx_ready = false;
     }
     if (sender)
     {
         NormSetGrttEstimate(norm_session, 0.001);
-        unsigned int segmentSize = 1400;
-        unsigned int blockSize = 64;
-        unsigned int numParity = 8;
+        NormSetBackoffFactor(norm_session, 0.0);
         if (norm_acking)
         {   
             // ack-based flow control enabled on command-line, 
@@ -268,6 +363,10 @@ bool NormStreamer::Start(bool sender, bool receiver)
             if (receiver) NormStopReceiver(norm_session);
             return false;
         }
+        NormSetGrttEstimate(norm_session, 0.001);
+        
+        //NormSetGrttMax(norm_session, 0.090);
+        //NormSetAutoParity(norm_session, 2);
         NormSetTxSocketBuffer(norm_session, 4*1024*1024);
         if (NORM_OBJECT_INVALID == (tx_stream = NormStreamOpen(norm_session, bufferSize)))
         {
@@ -276,13 +375,20 @@ bool NormStreamer::Start(bool sender, bool receiver)
             if (receiver) NormStopReceiver(norm_session);
             return false;
         }
+		else
+		{
+			if (0 != mlockall(MCL_CURRENT|MCL_FUTURE))
+                fprintf(stderr, "normStreamer warning: failed to lock memory for sender.\n");
+		}
         tx_segment_size = segmentSize;
         tx_stream_buffer_max = NormGetStreamBufferSegmentCount(bufferSize, segmentSize, blockSize);
         tx_stream_buffer_max -= blockSize;  // a little safety margin (perhaps not necessary)
+        tx_stream_buffer_threshold = tx_stream_buffer_max / 8;
         tx_stream_buffer_count = 0;
         tx_stream_bytes_remain = 0;
         tx_watermark_pending = false;
         tx_ready = true;
+        input_index = input_msg_length = 0;
         input_needed = true;
         input_ready = true;
     }
@@ -290,12 +396,47 @@ bool NormStreamer::Start(bool sender, bool receiver)
     return true;
 }  // end NormStreamer::Start();
 
+void NormStreamer::ReadInputSocket()
+{
+    unsigned int loopCount = 0;
+    NormSuspendInstance(NormGetInstance(norm_session));
+    while (input_needed && input_ready && (loopCount < LOOP_MAX))
+    {
+        loopCount++;
+        unsigned int numBytes = MSG_SIZE_MAX - MSG_HEADER_SIZE;
+        ProtoAddress srcAddr;
+        if (input_socket.RecvFrom(input_buffer+MSG_HEADER_SIZE, numBytes, srcAddr))
+        {
+            if (0 == numBytes)
+            {
+                input_ready = false;
+                break;
+            }
+            unsigned short msgSize = numBytes + MSG_HEADER_SIZE;
+            msgSize = htons(msgSize);
+            memcpy(input_buffer, &msgSize, MSG_HEADER_SIZE);
+            input_index = 0;
+            input_msg_length = numBytes;
+            input_needed = false;
+            if (TxReady()) SendData();
+        }
+        else
+        {
+            // TBD - handle error?
+            input_ready = false;
+        }
+    }
+    NormResumeInstance(NormGetInstance(norm_session));
+}  // end NormStreamer::ReadInputSocket()
+
 void NormStreamer::ReadInput()
 {
+    if (UdpListenerEnabled()) return ReadInputSocket();
     // The loop count makes sure we don't spend too much time here
     // before going back to the main loop to handle NORM events, etc
     unsigned int loopCount = 0;
-    while (input_needed && input_ready && (loopCount < 1000))
+    NormSuspendInstance(NormGetInstance(norm_session));
+    while (input_needed && input_ready && (loopCount < LOOP_MAX))
     {
         loopCount++;
         //if (100 == loopCount)
@@ -312,7 +453,8 @@ void NormStreamer::ReadInput()
             assert(input_index < input_msg_length);
             numBytes = input_msg_length - input_index;
         }
-        /*size_t result = fread(input_buffer + input_index, 1, numBytes, input_file);
+#if USE_FWRITE
+        size_t result = fread(input_buffer + input_index, 1, numBytes, input_file);
         if (result > 0)
         {
             input_index += result;
@@ -337,6 +479,7 @@ void NormStreamer::ReadInput()
             {
                 // Still need more input
                 // (wait for next input notification to read more)
+                fprintf(stderr, "wairing for input\n);
                 input_ready = false;
             }
         }
@@ -368,7 +511,8 @@ void NormStreamer::ReadInput()
                 }
             }
             break;
-        }*/
+        }
+#else
         ssize_t result = read(input_fd, input_buffer + input_index, numBytes);
         if (result > 0)
         {
@@ -423,7 +567,9 @@ void NormStreamer::ReadInput()
             }
             break;
         }
+#endif // if/else USE_FWRITE
     }  // end while (input_needed && input_ready)
+    NormResumeInstance(NormGetInstance(norm_session));
 }  // end NormStreamer::ReadInput()
 
 void NormStreamer::SendData()
@@ -438,9 +584,14 @@ void NormStreamer::SendData()
         {
             // Complete message was sent, so flush
             // TBD - provide flush "none", "passive", and "active" options
-            FlushStream(true, flush_mode);
+            //FlushStream(true, flush_mode);
+            NormStreamMarkEom(tx_stream);
             input_index = input_msg_length = 0;
             input_needed = true;
+        }
+        else
+        {
+            fprintf(stderr, "SendData() impeded by flow control\n");
         }
     }  // end while (TxReady() && !input_needed)
 }  // end NormStreamer::SendData()
@@ -466,15 +617,16 @@ unsigned int NormStreamer::WriteToStream(const char* buffer, unsigned int numByt
             else
             {
                 numBytes = bytesAvailable;
-                tx_stream_buffer_count = tx_stream_buffer_max;        
+                tx_stream_buffer_count = tx_stream_buffer_max;
             }
             // 2) Write to the stream
             bytesWritten = NormStreamWrite(tx_stream, buffer, numBytes);
             //assert(bytesWritten == numBytes);  // this could fail if timer-based flow control is left enabled
             // 3) Check if we need to issue a watermark ACK request?
-            if (!tx_watermark_pending && (tx_stream_buffer_count >= (tx_stream_buffer_max / 2)))
+            if (!tx_watermark_pending && (tx_stream_buffer_count >= tx_stream_buffer_threshold))
             {
                 // Initiate flow control ACK request
+                //fprintf(stderr, "initiating flow control ACK REQUEST\n");
                 NormSetWatermark(norm_session, tx_stream);
                 tx_watermark_pending = true;
             }
@@ -482,14 +634,18 @@ unsigned int NormStreamer::WriteToStream(const char* buffer, unsigned int numByt
         else
         {
             fprintf(stderr, "normStreamer: sender flow control limited\n");
-            bytesWritten = 0;
+            return 0;
         }
     }
     else
     {
         bytesWritten = NormStreamWrite(tx_stream, buffer, numBytes);
     }
-    if (bytesWritten != numBytes) tx_ready = false;
+    if (bytesWritten != numBytes) //NormStreamWrite() was (at least partially) blocked
+    {
+        fprintf(stderr, "NormStreamWrite() blocked by flow control ...\n");
+        tx_ready = false;
+    }
     return bytesWritten;
 }  // end NormStreamer::WriteToStream()
 
@@ -504,11 +660,12 @@ void NormStreamer::FlushStream(bool eom, NormFlushMode flushMode)
             // (and initiate flow control watermark ack request if buffer mid-point threshold exceeded
             tx_stream_buffer_count++;
             tx_stream_bytes_remain = 0;
-            if (!tx_watermark_pending && (tx_stream_buffer_count >= (tx_stream_buffer_max >> 1)))
+            if (!tx_watermark_pending && (tx_stream_buffer_count >= tx_stream_buffer_threshold))
             {
                 setWatermark = true;
                 tx_watermark_pending = true;
             }
+            
         }
         // The check for "tx_watermark_pending" here prevents a new watermark
         // ack request from being set until the pending flow control ack is 
@@ -545,7 +702,8 @@ void NormStreamer::RecvData()
     // before going back to the main loop to handle NORM events, etc
     unsigned int loopCount = 0;
     // Reads data from rx_stream to available output_buffer
-    while (rx_needed && rx_ready && (loopCount < 1000))
+    NormSuspendInstance(NormGetInstance(norm_session));
+    while (rx_needed && rx_ready && (loopCount < LOOP_MAX))
     {
         loopCount++;
         //if (100 == loopCount)
@@ -557,7 +715,7 @@ void NormStreamer::RecvData()
             if (!msg_sync) 
             {
                 rx_ready = false;
-                return;  // wait for next NORM_RX_OBJECT_UPDATED to re-sync
+                break;  // wait for next NORM_RX_OBJECT_UPDATED to re-sync
             }
         }
         unsigned int bytesWanted;
@@ -576,15 +734,20 @@ void NormStreamer::RecvData()
         if (!NormStreamRead(rx_stream, output_buffer + output_index, &bytesRead))
         {
             // Stream broken (should _not_ happen if norm_acking flow control)
-            fprintf(stderr, "normStreamer error: broken stream detected, re-syncing ...\n");
+            //fprintf(stderr, "normStreamer error: broken stream detected, re-syncing ...\n");
             msg_sync = false;
             output_index = output_msg_length = 0;
             continue;
         }
         output_index += bytesRead;
-        if (bytesRead != bytesWanted)
+        if (0 == bytesRead)
         {
-            rx_ready = false;  // didn't get all we need
+            rx_ready = false;
+        } 
+        else if (bytesRead != bytesWanted)
+        {
+            continue;
+            //rx_ready = false;  // didn't get all we need
         }
         else if (MSG_HEADER_SIZE == output_index)
         {
@@ -603,47 +766,43 @@ void NormStreamer::RecvData()
             if (output_ready) WriteOutput();
         }
     }
+    NormResumeInstance(NormGetInstance(norm_session));
+    
 }  // end NormStreamer::RecvData()
 
-void NormStreamer::WriteOutput()
+void NormStreamer::WriteOutputSocket()
 {
-    while (output_ready && !rx_needed)
+    if (output_ready && !rx_needed)
     {
         assert(output_index < output_msg_length);
-        ssize_t result = write(output_fd, output_buffer + output_index, output_msg_length - output_index);
-        if (result >= 0)
+        unsigned int payloadSize = output_msg_length - MSG_HEADER_SIZE;
+        unsigned int numBytes = payloadSize;
+        if (output_socket.SendTo(output_buffer+MSG_HEADER_SIZE, numBytes, relay_addr))
         {
-            output_index += result;
-            if (output_index == output_msg_length)
+            if (numBytes != payloadSize)
             {
-                // Complete message written
-                rx_needed = true;
-                output_index = output_msg_length = 0;
-            }
-            else
-            {
+                // sendto() was blocked
                 output_ready = false;
+                return;
             }
+            rx_needed = true;
+            output_index = output_msg_length = 0;
         }
         else
         {
-            switch (errno)
-            {
-                case EINTR:
-                    perror("normStreamer output EINTR");
-                    continue;  // interupted, try again
-                case EAGAIN:
-                    // output blocked, wait for next notification
-                    //perror("normStreamer output blocked");
-                    output_ready = false;
-                    break;
-                default:
-                    perror("normStreamer error writing output");
-                    break;
-            }
-            break;
+            output_ready = false;
         }
-        /*size_t result = fwrite(output_buffer + output_index, 1, output_msg_length - output_index, output_file);
+    }
+}  // end NormStreamer::WriteOutputSocket()
+
+void NormStreamer::WriteOutput()
+{
+    if (UdpRelayEnabled()) return WriteOutputSocket();
+    while (output_ready && !rx_needed)
+    {
+        assert(output_index < output_msg_length);
+#if USE_FWRITE
+        size_t result = fwrite(output_buffer + output_index, 1, output_msg_length - output_index, output_file);
         if (result > 0)
         {
             output_index += result;
@@ -687,7 +846,41 @@ void NormStreamer::WriteOutput()
             }
             return;
         }
-        */
+#else
+        ssize_t result = write(output_fd, output_buffer + output_index, output_msg_length - output_index);
+        if (result >= 0)
+        {
+            output_index += result;
+            if (output_index == output_msg_length)
+            {
+                // Complete message written
+                rx_needed = true;
+                output_index = output_msg_length = 0;
+            }
+            else
+            {
+                output_ready = false;
+            }
+        }
+        else
+        {
+            switch (errno)
+            {
+                case EINTR:
+                    perror("normStreamer output EINTR");
+                    continue;  // interupted, try again
+                case EAGAIN:
+                    // output blocked, wait for next notification
+                    //perror("normStreamer output blocked");
+                    output_ready = false;
+                    break;
+                default:
+                    perror("normStreamer error writing output");
+                    break;
+            }
+            break;
+        }
+#endif  // if/else USE_FWRITE
     }
 }  // end NormStreamer::WriteOutput()
 
@@ -713,7 +906,8 @@ void NormStreamer::HandleNormEvent(const NormEvent& event)
                 {
                     // Flow control ack request was pending.
                     tx_watermark_pending = false;
-                    tx_stream_buffer_count -= (tx_stream_buffer_max >> 1);
+                    tx_stream_buffer_count -= tx_stream_buffer_threshold;
+                    //fprintf(stderr, "flow control ACK completed\n");
                 }
             }
             else
@@ -789,6 +983,7 @@ void Usage()
     fprintf(stderr, "Usage: normStreamer id <nodeId> {send | recv} [addr <addr>[/<port>]][ack <node1>[,<node2>,...]\n"
                     "                    [cc|cce|ccl|rate <bitsPerSecond>][interface <name>][debug <level>][trace]\n"
                     "                    [listen [<mcastAddr>/]<port>][relay <dstAddr>/<port>]\n"
+                    "                    [debug <level>][trace][log <logfile>]\n"
                     "                    [omit][silent][txloss <lossFraction>]\n");
 }
 int main(int argc, char* argv[])
@@ -806,10 +1001,6 @@ int main(int argc, char* argv[])
     listenAddr[0] = '\0';
     unsigned int listenPort = 0;  // optional UDP port to listen for input
     
-    char relayAddr[64]; // optional UDP destination address/port to relay output
-    relayAddr[0] = '\0';
-    unsigned int relayPort = 0;
-    
     NormNodeId ackingNodeList[256]; 
     unsigned int ackingNodeCount = 0;
     
@@ -817,11 +1008,16 @@ int main(int argc, char* argv[])
     NormStreamer::CCMode ccMode = NormStreamer::NORM_CC;
     const char* mcastIface = NULL;
     
+    const char * listenerMcastIface = NULL ;
+    bool loopback = false;
     int debugLevel = 0;
     bool trace = false;
+    const char* logFile = NULL;
     bool omitHeaderOnOutput = false;
     bool silentReceiver = false;
     double txloss = 0.0;
+    
+    NormStreamer normStreamer;
     
     // Parse command-line
     int i = 1;
@@ -837,11 +1033,15 @@ int main(int argc, char* argv[])
         {
             recv = true;
         }
+        else if (0 == strncmp(cmd, "loopback", len))
+        {
+            loopback = true;
+        }
         else if (0 == strncmp(cmd, "addr", len))
         {
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing 'addr[/port]' value!\n");
+                fprintf(stderr, "normStreamer error: missing 'addr[/port]' value!\n");
                 Usage();
                 return -1;
             }
@@ -866,7 +1066,7 @@ int main(int argc, char* argv[])
         {
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing '[mcastAddr/]port]' value!\n");
+                fprintf(stderr, "normStreamer error: missing '[mcastAddr/]port]' value!\n");
                 Usage();
                 return -1;
             }
@@ -879,19 +1079,29 @@ int main(int argc, char* argv[])
                 strncpy(listenAddr, addrPtr, addrLen);
                 listenAddr[addrLen] = '\0';
                 portPtr++;
+                addrPtr = listenAddr;
                 listenPort = atoi(portPtr);
             }
             else
             {
                 // no address, just port
                 listenPort = atoi(addrPtr);
+                addrPtr = NULL;
+            }
+            if (!normStreamer.EnableUdpListener(listenPort, addrPtr, listenerMcastIface))
+            {
+                fprintf(stderr, "normStreamer error: Failed to enable UDP listener\n") ;
+                return -1;
             }
         }
         else if (0 == strncmp(cmd, "relay", len))
         {
+            char relayAddr[64]; 
+            relayAddr[0] = '\0';
+            unsigned int relayPort = 0;
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing relay 'dstAddr/port]' value!\n");
+                fprintf(stderr, "normStreamer error: missing relay 'dstAddr/port]' value!\n");
                 Usage();
                 return -1;
             }
@@ -899,7 +1109,7 @@ int main(int argc, char* argv[])
             const char* portPtr = strchr(addrPtr, '/');
             if (NULL == portPtr)
             {
-                fprintf(stderr, "nodeMsgr error: missing relay 'port' value!\n");
+                fprintf(stderr, "normStreamer error: missing relay 'port' value!\n");
                 Usage();
                 return -1;
             }
@@ -912,12 +1122,14 @@ int main(int argc, char* argv[])
                 portPtr++;
                 relayPort = atoi(portPtr);
             }
+            // TBD - check addr/port validity?
+            normStreamer.EnableUdpRelay(relayAddr, relayPort);
         }
         else if (0 == strncmp(cmd, "id", len))
         {
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing 'id' value!\n");
+                fprintf(stderr, "normStreamer error: missing 'id' value!\n");
                 Usage();
                 return -1;
             }
@@ -928,7 +1140,7 @@ int main(int argc, char* argv[])
             // comma-delimited acking node id list
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing 'id' <nodeId> value!\n");
+                fprintf(stderr, "normStreamer error: missing 'id' <nodeId> value!\n");
                 Usage();
                 return -1;
             }
@@ -938,7 +1150,7 @@ int main(int argc, char* argv[])
                 // TBD - Do we need to skip leading white space?
                 if (1 != sscanf(alist, "%d", ackingNodeList + ackingNodeCount))
                 {
-                    fprintf(stderr, "nodeMsgr error: invalid acking node list!\n");
+                    fprintf(stderr, "normStreamer error: invalid acking node list!\n");
                     Usage();
                     return -1;
                 }
@@ -951,13 +1163,13 @@ int main(int argc, char* argv[])
         {
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing 'rate' <bitsPerSecond> value!\n");
+                fprintf(stderr, "normStreamer error: missing 'rate' <bitsPerSecond> value!\n");
                 Usage();
                 return -1;
             }
             if (1 != sscanf(argv[i++], "%lf", &txRate))
             {
-                fprintf(stderr, "nodeMsgr error: invalid transmit rate!\n");
+                fprintf(stderr, "normStreamer error: invalid transmit rate!\n");
                 Usage();
                 return -1;
             }       
@@ -980,12 +1192,22 @@ int main(int argc, char* argv[])
         {
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing 'interface' <name>!\n");
+                fprintf(stderr, "normStreamer error: missing 'interface' <name>!\n");
                 Usage();
                 return -1;
             }
             mcastIface = argv[i++];
         }
+		else if (0 == strncmp(cmd, "linterface", len))
+		{
+			if (i >= argc)
+			{
+				fprintf(stderr, "normStreamer error: missing 'linterface' <name>!\n");
+				Usage();
+				return -1;
+			}
+			listenerMcastIface = argv[i++];
+		}
         else if (0 == strncmp(cmd, "omit", len))
         {
             omitHeaderOnOutput = true;
@@ -998,7 +1220,7 @@ int main(int argc, char* argv[])
         {
             if (1 != sscanf(argv[i++], "%lf", &txloss))
             {
-                fprintf(stderr, "nodeMsgr error: invalid 'txloss' value!\n");
+                fprintf(stderr, "normStreamer error: invalid 'txloss' value!\n");
                 Usage();
                 return -1;
             }
@@ -1007,7 +1229,7 @@ int main(int argc, char* argv[])
         {
             if (i >= argc)
             {
-                fprintf(stderr, "nodeMsgr error: missing 'interface' <name>!\n");
+                fprintf(stderr, "normStreamer error: missing 'debug' <level>!\n");
                 Usage();
                 return -1;
             }
@@ -1017,6 +1239,16 @@ int main(int argc, char* argv[])
         {
             trace = true;
         }
+        else if (0 == strncmp(cmd, "log", len))
+        {
+            if (i >= argc)
+            {
+                fprintf(stderr, "normStreamer error: missing 'log' <fileName>!\n");
+                Usage();
+                return -1;
+            }
+            logFile = argv[i++];
+        }
         else if (0 == strncmp(cmd, "help", len))
         {
             Usage();
@@ -1024,7 +1256,7 @@ int main(int argc, char* argv[])
         }
         else
         {
-            fprintf(stderr, "nodeMsgr error: invalid command \"%s\"!\n", cmd);
+            fprintf(stderr, "normStreamer error: invalid command \"%s\"!\n", cmd);
             Usage();
             return -1;
         }
@@ -1046,8 +1278,15 @@ int main(int argc, char* argv[])
     // TBD - should provide more error checking of calls
     NormInstanceHandle normInstance = NormCreateInstance();
     NormSetDebugLevel(debugLevel);
+    if ((NULL != logFile) && !NormOpenDebugLog(normInstance, logFile))
+    {
+        perror("normStreamer error: unable to open log file");
+        Usage();
+        return -1;
+    }
+        
     
-    NormStreamer normStreamer;
+    normStreamer.SetLoopback(loopback);
     
     if (omitHeaderOnOutput) normStreamer.OmitHeader(true);
     
@@ -1077,27 +1316,45 @@ int main(int argc, char* argv[])
     
     int normfd = NormGetDescriptor(normInstance);
     // Get input/output descriptors and set to non-blocking i/o
-    int inputfd = normStreamer.GetInputFile();
-    if (-1 == fcntl(inputfd, F_SETFL, fcntl(inputfd, F_GETFL, 0) | O_NONBLOCK))
-        perror("normStreamer: fcntl(inputfd, O_NONBLOCK) error");
-    int outputfd = normStreamer.GetOutputFile();
-    if (-1 == fcntl(outputfd, F_SETFL, fcntl(outputfd, F_GETFL, 0) | O_NONBLOCK))
-        perror("normStreamer: fcntl(outputfd, O_NONBLOCK) error");
+    int inputfd = normStreamer.GetInputDescriptor();
+    int outputfd = normStreamer.GetOutputDescriptor();
+    //if (!normStreamer.UdpListenerEnabled())
+    {
+        if (-1 == fcntl(inputfd, F_SETFL, fcntl(inputfd, F_GETFL, 0) | O_NONBLOCK))
+            perror("normStreamer: fcntl(inputfd, O_NONBLOCK) error");
+    }
+#if !USE_FWRITE  
+    // Don't set O_NONBLOCK when using fwrite()
+    if (!normStreamer.UdpRelayEnabled())
+    {
+        if (-1 == fcntl(outputfd, F_SETFL, fcntl(outputfd, F_GETFL, 0) | O_NONBLOCK))
+            perror("normStreamer: fcntl(outputfd, O_NONBLOCK) error");
+    }
+#endif
     fd_set fdsetInput, fdsetOutput;
     FD_ZERO(&fdsetInput);
     FD_ZERO(&fdsetOutput);
     while (normStreamer.IsRunning())
     {
         int maxfd = -1;
-        if ((normStreamer.TxPending() && !normStreamer.TxReady()) || 
-            (normStreamer.RxNeeded() && !normStreamer.RxReady()))
-            
+        // Only wait on NORM if needed for tx or rx readiness
+        bool waitOnNorm = true;
+        if (!(normStreamer.RxNeeded() || normStreamer.TxPending()))
+            waitOnNorm = false; // no need to wait
+        else if (normStreamer.RxNeeded() && normStreamer.RxReady())  
+            waitOnNorm = false; // no need to wait
+        else if (normStreamer.TxPending() && normStreamer.TxReady())
+            waitOnNorm = false; // no need to wait
+        if (waitOnNorm)
         {
+            /*fprintf(stderr, "waiting on NORM event> txPending:%d txReady:%d rxNeeded:%d rxReady:%d\n", 
+                             normStreamer.TxPending(), normStreamer.TxReady(),
+                             normStreamer.RxNeeded(), normStreamer.RxReady());*/
             // we need to wait until NORM is tx_ready or rx_ready
             FD_SET(normfd, &fdsetInput);
             maxfd = normfd;
         }
-        if (normStreamer.InputNeeded())
+        if (normStreamer.InputNeeded() && !normStreamer.InputReady())
         {   
             FD_SET(inputfd, &fdsetInput);
             if (inputfd > maxfd) maxfd = inputfd;
@@ -1106,55 +1363,44 @@ int main(int argc, char* argv[])
         {
             FD_CLR(inputfd, &fdsetInput);
         }
-        int result;
         if (normStreamer.OutputPending() && !normStreamer.OutputReady())
         {
             FD_SET(outputfd, &fdsetOutput);
             if (outputfd > maxfd) maxfd = outputfd;
-            result = select(maxfd+1, &fdsetInput, &fdsetOutput, NULL, NULL);
         }
         else
         {   
             FD_CLR(outputfd, &fdsetOutput);
-            if (maxfd >= 0)
-                result = select(maxfd+1, &fdsetInput, NULL, NULL, NULL);
-            else
-                result = 1;  // pass through (not waiting on any descriptors)
         }
-        switch (result)
+        if (maxfd >= 0)
         {
-            case -1:
-                switch (errno)
-                {
-                    case EINTR:
-                    case EAGAIN:
-                        continue;
-                    default:
-                        perror("normStreamer select() error");
-                        // TBD - stop NormStreamer
-                        break;
-                }
-                break;
-            case 0:
-                // shouldn't occur for now (no timeout)
-                continue;
-            default:
-                if (FD_ISSET(inputfd, &fdsetInput))
-                {
-                    normStreamer.SetInputReady();
-                }   
-                if (FD_ISSET(outputfd, &fdsetOutput))
-                {
-                    normStreamer.SetOutputReady();
-                }
-                /*if (FD_ISSET(normfd, &fdsetInput))
-                {
-                    NormEvent event;
-                    while (NormGetNextEvent(normInstance, &event, false))
-                        normStreamer.HandleNormEvent(event);
-                }*/ 
-                break; 
+            int result = select(maxfd+1, &fdsetInput, &fdsetOutput, NULL, NULL);
+            switch (result)
+            {
+                case -1:
+                    switch (errno)
+                    {
+                        case EINTR:
+                        case EAGAIN:
+                            continue;
+                        default:
+                            perror("normStreamer select() error");
+                            // TBD - stop NormStreamer
+                            break;
+                    }
+                    break;
+                case 0:
+                    // shouldn't occur for now (no timeout)
+                    continue;
+                default:
+                    if (FD_ISSET(inputfd, &fdsetInput))
+                        normStreamer.SetInputReady();
+                    if (FD_ISSET(outputfd, &fdsetOutput))
+                        normStreamer.SetOutputReady();
+                    break; 
+            }
         }
+        
         // We always clear out/handle pending NORM API events
         // (to keep event queue from building up)
         NormEvent event;
@@ -1173,6 +1419,7 @@ int main(int argc, char* argv[])
         // 4) Send any pending tx message
         if (normStreamer.TxPending() && normStreamer.TxReady())
             normStreamer.SendData();
+        
     }  // end while(normStreamer.IsRunning()
     
     fprintf(stderr, "normStreamer exiting ...\n");

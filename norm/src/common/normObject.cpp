@@ -1308,7 +1308,7 @@ void NormObject::HandleObjectMessage(const NormObjectMsg& msg,
                     else
                     {
                         // If we try to resync to too far back, we end up chasing our tail here
-                        // do we just sync to the current block under these circumstances
+                        // so we just sync to the current block under these circumstances
                         stream->StreamResync(blockId); // - pending_mask.GetSize()/2);
                         break;
                     }      
@@ -1626,8 +1626,7 @@ NormBlock* NormObject::StealOldestBlock(bool excludeBlock, NormBlockId excludeId
 
 
 bool NormObject::NextSenderMsg(NormObjectMsg* msg)
-{
-    
+{             
     // Init() the message
     if (pending_info)
     {
@@ -1716,7 +1715,7 @@ bool NormObject::NextSenderMsg(NormObjectMsg* msg)
         if (IsStream())
         {
             if (static_cast<NormStreamObject*>(this)->StreamAdvance())
-            {
+            {   
                 return NextSenderMsg(msg);
             }
             else
@@ -1806,9 +1805,9 @@ bool NormObject::NextSenderMsg(NormObjectMsg* msg)
            }
            else
            {
-               PLOG(PL_FATAL, "NormObject::NextSenderMsg() invalid non-stream state!\n");
-               ASSERT(0);
-               return false;
+                PLOG(PL_FATAL, "NormObject::NextSenderMsg() invalid non-stream state!\n");
+                ASSERT(0);
+                return false;
            }
        }
     }  // end if (!block)
@@ -1986,7 +1985,7 @@ bool NormStreamObject::StreamAdvance()
             }
             else
             {
-               PLOG(PL_WARN, "NormStreamObject::StreamAdvance() warning: node>%lu pending segment repairs (blk>%lu) "
+               PLOG(PL_DEBUG, "NormStreamObject::StreamAdvance() warning: node>%lu pending segment repairs (blk>%lu) "
                        "delaying stream advance ...\n", LocalNodeId(), (UINT32)block->GetId());
             } 
         }
@@ -2596,14 +2595,14 @@ bool NormStreamObject::Open(UINT32      bufferSize,
                             const char* infoPtr, 
                             UINT16      infoLen)
 {
-    if (!bufferSize) 
+    if (0 == bufferSize) 
     {
         PLOG(PL_FATAL, "NormStreamObject::Open() zero bufferSize error\n");
         return false;
     }
     
     UINT16 segmentSize, numData;
-    if (sender)
+    if (NULL != sender)
     {
         // receive streams have already beeen pre-opened
         segmentSize = segment_size;
@@ -2654,7 +2653,7 @@ bool NormStreamObject::Open(UINT32      bufferSize,
     tx_offset = write_offset = read_offset = 0;    
     write_vacancy = true;
     
-    if (!sender)
+    if (NULL == sender)
     {
         if (!NormObject::Open(NormObjectSize((UINT32)bufferSize), 
                               infoPtr, 
@@ -2681,6 +2680,7 @@ bool NormStreamObject::Open(UINT32      bufferSize,
 
 bool NormStreamObject::Accept(UINT32 bufferSize, bool doubleBuffer)
 {
+    if (Accepted()) return true;  // was preset_stream (already pre-accepted)
     if (Open(bufferSize, doubleBuffer))
     {
         NormObject::Accept(); 
@@ -2783,14 +2783,14 @@ bool NormStreamObject::StreamUpdateStatus(NormBlockId blockId)
                         // Handle potential stream_sync_id wrap
                         NormBlockId delta = stream_next_id - stream_sync_id;
                         if (delta > NormBlockId(2*pending_mask.GetSize()))
+                        {
                             GetFirstPending(stream_sync_id);
+                        }
                         return true;
                     }
                     else
                     {
                         // Stream broken
-                        NormBlockId firstPending;
-                        GetFirstPending(firstPending);
                         return false;   
                     }
                 }
@@ -2809,7 +2809,9 @@ bool NormStreamObject::StreamUpdateStatus(NormBlockId blockId)
                         // Handle potential stream_sync_id wrap
                         NormBlockId delta = stream_next_id - stream_sync_id;
                         if (delta > NormBlockId(2*pending_mask.GetSize()))
+                        {
                             GetFirstPending(stream_sync_id);
+                        }
                         return true;
                     }  
                 }
@@ -3053,6 +3055,7 @@ bool NormStreamObject::WriteSegment(NormBlockId   blockId,
                             block->EmptyToPool(segment_pool);
                             block_pool.Put(block);
                             block = NULL;
+                            //TRACE("Prune(%u) 6 ...\n", (UINT32)read_index.block);
                             Prune(read_index.block, false);
                             break;
                         }      
@@ -3065,12 +3068,13 @@ bool NormStreamObject::WriteSegment(NormBlockId   blockId,
                     break;  
                 }
             }  // end while (block->IsPending())   
-            if (block)
+            if (NULL != block)
             {
                 if (block->GetId() == read_index.block)
                 {
                     read_index.block++;
                     read_index.segment = 0;
+                    //TRACE("Prune(%u) 7 ...\n", (UINT32)read_index.block);
                     Prune(read_index.block, false);   
                 }
                 stream_buffer.Remove(block);
@@ -3128,7 +3132,6 @@ bool NormStreamObject::WriteSegment(NormBlockId   blockId,
                     read_ready = true;
             }
         }
-        
     }
     return true;
 }  // end NormStreamObject::WriteSegment()
@@ -3171,7 +3174,7 @@ void NormStreamObject::Prune(NormBlockId blockId, bool updateStatus)
             if (GetFirstPending(firstId))
             {
                 NormBlock* block = block_buffer.Find(firstId);
-                if (block)
+                if (NULL != block)
                 {
                     block_buffer.Remove(block);
                     sender->PutFreeBlock(block);
@@ -3184,7 +3187,18 @@ void NormStreamObject::Prune(NormBlockId blockId, bool updateStatus)
                 break;
             }          
         }
-        if (resync) sender->IncrementResyncCount();
+        if (resync) 
+        {
+            if (updateStatus && (read_index.block < blockId) && notify_on_update)
+            {
+                // If "updateStatus" is true, then Prune() was invoked due to SQUELCH
+                // This will prompt the app to read from the stream which, in turn
+                // will force the stream read_index forward
+                notify_on_update = false;
+                session.Notify(NormController::RX_OBJECT_UPDATED, sender, this);
+            }
+            sender->IncrementResyncCount();
+        }
     }
 }  // end NormStreamObject::Prune()
 
@@ -3212,9 +3226,22 @@ bool NormStreamObject::PassiveReadCheck(NormBlockId blockId, NormSegmentId segme
 
 bool NormStreamObject::Read(char* buffer, unsigned int* buflen, bool seekMsgStart)
 {
+    unsigned int bytesWanted = *buflen;
     bool result = ReadPrivate(buffer, buflen, seekMsgStart);
-    if (!read_ready)
-        SetNotifyOnUpdate(true);  // reset notification when stream is no longer "read_ready"
+    if (!read_ready)  // should this be if (result && (*buflen != bytesWanted) instead?
+    {
+        /*if (DetermineReadReadiness())
+        {
+            // We didn't get what we wanted this time (stream break), but the next data is ready
+            notify_on_update = false;
+            session.Notify(NormController::RX_OBJECT_UPDATED, sender, this);
+        }
+        else*/
+        {
+            notify_on_update = true;  // reset notification when stream is no longer "read_ready"
+        }
+    }
+    ASSERT(!read_ready || (*buflen == bytesWanted));
     return result;
 }  // end NormStreamObject::Read()
 
@@ -3274,6 +3301,7 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                 {
                     read_index.block++;  
                     read_index.segment = 0; 
+                    //TRACE("Prune(%u) 1 ...\n", (UINT32)read_index.block);
                     Prune(read_index.block, false);
                     continue;
                 }
@@ -3334,6 +3362,7 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                         block_pool.Put(block);
                         read_index.block++;
                         read_index.segment = 0;
+                        //TRACE("Prune(%u) 2 ...\n", (UINT32)read_index.block);
                         Prune(read_index.block, false); // prevents repair requests for data we 
                     }                                   // no longer care about
                     continue;
@@ -3375,11 +3404,12 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
         else if (length > segment_size)
         {
             // This segment is an invalid segment because its length is too long
-            Release();
+            read_ready = false; 
             if (bytesRead > 0)
             {
                 // Go ahead and return data read thus so far
                 *buflen = bytesRead;
+                Release();
                 return true;       
             }
             else
@@ -3394,10 +3424,11 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                     block_pool.Put(block);
                     read_index.block++;
                     read_index.segment = 0;
+                    //TRACE("Prune(%u) 3 ...\n", (UINT32)read_index.block);
                     Prune(read_index.block, false);
                 }
                 *buflen = 0;
-                read_ready = false; //DetermineReadReadiness();
+                Release();
                 return false;
             }
         }
@@ -3406,11 +3437,12 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
         UINT32 diff = read_offset - segmentOffset;
         if ((diff > 0x80000000) || ((0x80000000 == diff) && (read_offset > segmentOffset)))
         {
-            Release();
+            read_ready = false; //DetermineReadReadiness();
             if (bytesRead > 0)
             {
                 // Go ahead and return data read thus so far
                 *buflen = bytesRead;
+                Release();
                 return true; 
             }
             else
@@ -3420,7 +3452,7 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                         read_offset, segmentOffset);
                 read_offset = segmentOffset;
                 *buflen = 0;
-                read_ready = false; //DetermineReadReadiness();
+                Release();
                 return false;
             }
         }
@@ -3429,11 +3461,12 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
         
 	    if ((length > 0) && (index >= length))
         {
-            Release();
+            read_ready = false; //DetermineReadReadiness();
             if (bytesRead > 0)
             {
                 // Go ahead and return data read thus so far
                 *buflen = bytesRead;
+                Release();
                 return true; 
             }
             else
@@ -3444,7 +3477,7 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                 // Reset our read_offset ...
                 read_offset = segmentOffset;
                 *buflen = 0;
-                read_ready = false; //DetermineReadReadiness();
+                Release();
                 return false;
             }
         }
@@ -3474,6 +3507,7 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                     block_pool.Put(block);
                     read_index.block++;
                     read_index.segment = 0;
+                    //TRACE("Prune(%u) 4 ...\n", (UINT32)read_index.block);
                     Prune(read_index.block, false);
                 }
                 continue;
@@ -3515,6 +3549,7 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                 block_pool.Put(block);
                 read_index.block++;
                 read_index.segment = 0;
+                //TRACE("Prune(%u) 5 ...\n", (UINT32)read_index.block);
                 Prune(read_index.block, false);
                 if (0 == bytesToRead)
                     read_ready = DetermineReadReadiness();
@@ -3524,7 +3559,6 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                 if (0 == bytesToRead)
                     read_ready = (NULL != block->GetSegment(read_index.segment));
             }
-            
             if (streamEnded)
             {
                 PLOG(PL_DEBUG, "NormStreamObject::ReadPrivate() stream ended by sender 2\n");
@@ -3533,11 +3567,11 @@ bool NormStreamObject::ReadPrivate(char* buffer, unsigned int* buflen, bool seek
                 sender->DeleteObject(this);  
             }
         } 
-    }  while ((bytesToRead > 0) || seekMsgStart); // end while (len > 0)
+    }  while ((bytesToRead > 0) || seekMsgStart); 
     *buflen = bytesRead;
     Release();
     return true;
-}  // end NormStreamObject::Read()
+}  // end NormStreamObject::ReadPrivate()
 
 
 void NormStreamObject::Terminate()
@@ -3630,7 +3664,7 @@ void NormStreamObject::Terminate()
 }  // end NormStreamObject::Terminate()
 
 UINT32 NormStreamObject::Write(const char* buffer, UINT32 len, bool eom)
-{
+{               
     UINT32 nBytes = 0;
     do
     {

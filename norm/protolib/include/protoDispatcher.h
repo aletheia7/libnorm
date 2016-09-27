@@ -390,9 +390,10 @@ class ProtoDispatcher : public ProtoTimerMgr,
         void Win32Cleanup();
 #endif // WIN32 
         
-    private:
+    public:
         bool SignalThread();
         void UnsignalThread();
+    private:
         bool WasSignaled()
         {
             // Check for and reset "break" signal
@@ -410,13 +411,17 @@ class ProtoDispatcher : public ProtoTimerMgr,
                     }
                 }
 #else        
+                /*bool result = false;
+                char byte[32];
+                while (read(break_pipe_fd[0], byte, 32) > 0) result = true;
+                return result;*/
                 if ((wait_status > 0) && (FD_ISSET(break_pipe_fd[0], &input_set)))
                 {
                     // Reset by emptying pipe
                     char byte[32];
                     while (read(break_pipe_fd[0], byte, 32) > 0);
                     return true;
-                }  
+                } 
 #endif // if/else WIN32/UNIX
             }
             return false;

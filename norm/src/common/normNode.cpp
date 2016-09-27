@@ -68,9 +68,9 @@ const double NormSenderNode::ACTIVITY_INTERVAL_MIN = 1.0;  // 1 second min activ
 NormSenderNode::NormSenderNode(class NormSession& theSession, NormNodeId nodeId)
  : NormNode(SENDER, theSession, nodeId), instance_id(0), robust_factor(session.GetRxRobustFactor()),
    synchronized(false), sync_id(0),
-   is_open(false), segment_size(0), fec_m(0), ndata(0), nparity(0), 
+   is_open(false), segment_size(0), fec_m(0), ndata(0), nparity(0), preset_stream(NULL),
    repair_boundary(BLOCK_BOUNDARY), decoder(NULL), erasure_loc(NULL),
-   retrieval_loc(NULL), retrieval_pool(NULL), ack_pending(false),
+   retrieval_loc(NULL), retrieval_pool(NULL), ack_pending(false), notify_on_grtt_update(true),
    cc_sequence(0), cc_enable(false), cc_feedback_needed(false), cc_rate(0.0), 
    rtt_confirmed(false), is_clr(false), is_plr(false),
    slow_start(true), send_rate(0.0), recv_rate(0.0), recv_rate_prev(0.0),
@@ -527,7 +527,11 @@ void NormSenderNode::UpdateGrttEstimate(UINT8 grttQuantized)
     activity_timer.SetInterval(activityInterval);
     if (activity_timer.IsActive()) activity_timer.Reschedule();
     // (TBD) Scale/reschedule repair_timer and/or cc_timer???
-    session.Notify(NormController::GRTT_UPDATED, this, (NormObject*)NULL);
+    if (notify_on_grtt_update)
+    {
+        notify_on_grtt_update = false;
+        session.Notify(NormController::GRTT_UPDATED, this, (NormObject*)NULL);
+    }
 }  // end NormSenderNode::UpdateGrttEstimate()
 
 
@@ -574,6 +578,8 @@ void NormSenderNode::HandleCommand(const struct timeval& currentTime,
             if ((NULL != obj) && (NormObject::STREAM == obj->GetType()))
             {
                 NormBlockId blockId = squelch.GetFecBlockId(fec_m);
+                //NormStreamObject* stream = (NormStreamObject*)obj;
+                //TRACE("Prune(%u) 8 (read_index = %u.%hu)...\n", (UINT32)blockId, (UINT32)stream->GetNextBlockId(), stream->GetNextSegmentId());
                 static_cast<NormStreamObject*>(obj)->Prune(blockId, true);   
             }
             // 3) Discard any invalidated objects (those listed in the squelch)
@@ -756,7 +762,8 @@ void NormSenderNode::HandleCommand(const struct timeval& currentTime,
                        watermark_segment_id = symbolId;
                        if (!ack_timer.IsActive())
                        {
-                            double ackBackoff = session.Address().IsMulticast() ? UniformRand(grtt_estimate) : 0.0;
+                            double ackBackoff = (session.Address().IsMulticast() && (backoff_factor > 0.0)) ? 
+                                                    UniformRand(grtt_estimate) : 0.0;
                             ack_timer.SetInterval(ackBackoff);
                             ack_pending = true;
                             session.ActivateTimer(ack_timer); 
@@ -1200,6 +1207,129 @@ char* NormSenderNode::GetFreeSegment(NormObjectId objectId, NormBlockId blockId)
     return result;
 }  // end NormSenderNode::GetFreeSegment()
 
+bool NormSenderNode::PreallocateRxStream(unsigned int   bufferSize,
+                                         UINT16         segmentSize, 
+                                         UINT16         numData, 
+                                         UINT16         numParity)
+{
+    if (NULL!= preset_stream) delete preset_stream;
+    if (NULL == (preset_stream = new NormStreamObject(session, this, 0)))
+    {
+        PLOG(PL_ERROR, "NormSenderNode::PreallocateRxStream() new NormStreamObject error: %s\n",
+                       GetErrorString());
+        return false;
+    }
+    UINT8 fecId;
+    UINT8 fecM = 8;
+    if ((numData + numParity) > 255)
+    {
+        fecId = 2;
+        fecM = 16;
+    }
+    else
+    {
+        fecId = 5;
+    }
+    UINT32 blockSize = segmentSize * numData;
+    UINT32 numBlocks = bufferSize / blockSize;
+    // Buffering requires at least 2 blocks
+    numBlocks = MAX(2, numBlocks);
+    // Recompute "bufferSize" to match any adjustments
+    bufferSize = numBlocks * blockSize;
+    if (!preset_stream->RxOpen(NormObjectSize(bufferSize), 
+                               true,
+                               segmentSize, 
+                               fecId, 
+                               fecM,
+                               numData,
+                               numParity))
+    {
+        PLOG(PL_ERROR, "NormSenderNode::PreallocateRxStream() error: RxOpen() failure\n");
+        delete preset_stream;
+        preset_stream = NULL;
+        return false;
+    }
+    if (!preset_stream->Accept(bufferSize, true))
+    {
+        PLOG(PL_ERROR, "NormSenderNode::PreallocateRxStream() error: Accept() failure\n");
+        delete preset_stream;
+        preset_stream = NULL;
+        return false;
+    }
+    return true;
+}  // end NormSenderNode::PreallocateRxStream()
+
+
+bool NormSenderNode::GetFtiData(const NormObjectMsg& msg, NormFtiData& ftiData)
+{
+    UINT8 fecId = msg.GetFecId();
+    switch (fecId)
+    {
+        case 2:
+        {
+            NormFtiExtension2 fti;
+            while (msg.GetNextExtension(fti))
+            {
+                if (NormHeaderExtension::FTI == fti.GetType())
+                {
+                    ASSERT(1 == fti.GetFecGroupSize());  // TBD - allow for different groupings
+                    ftiData.SetFecInstanceId(0);
+                    ftiData.SetFecFieldSize(fti.GetFecFieldSize());
+                    ftiData.SetSegmentSize(fti.GetSegmentSize());
+                    ftiData.SetFecMaxBlockLen(fti.GetFecMaxBlockLen());
+                    ftiData.SetFecNumParity(fti.GetFecNumParity());
+                    ftiData.SetObjectSize(fti.GetObjectSize());
+                    return true;
+                }
+            }
+            break;
+        }
+        case 5:
+        {
+            NormFtiExtension5 fti;
+            while (msg.GetNextExtension(fti))
+            {
+                if (NormHeaderExtension::FTI == fti.GetType())
+                {
+                    ftiData.SetFecInstanceId(0);
+                    ftiData.SetFecFieldSize(8);
+                    ftiData.SetSegmentSize(fti.GetSegmentSize());
+                    ftiData.SetFecMaxBlockLen(fti.GetFecMaxBlockLen());
+                    ftiData.SetFecNumParity(fti.GetFecNumParity());
+                    ftiData.SetObjectSize(fti.GetObjectSize());
+                    return true;
+                }
+            }
+            break;
+        }
+        case 129:
+        {
+            NormFtiExtension129 fti;
+            while (msg.GetNextExtension(fti))
+            {
+                if (NormHeaderExtension::FTI == fti.GetType())
+                {
+                    ftiData.SetFecInstanceId(fti.GetFecInstanceId());
+                    ftiData.SetFecFieldSize(8);
+                    ftiData.SetSegmentSize(fti.GetSegmentSize());
+                    ftiData.SetFecMaxBlockLen(fti.GetFecMaxBlockLen());
+                    ftiData.SetFecNumParity(fti.GetFecNumParity());
+                    ftiData.SetObjectSize(fti.GetObjectSize());
+                    return true;
+                }
+            }
+            break;
+        }
+        default:
+            PLOG(PL_ERROR, "NormSenderNode::GetFtiData() node>%lu sender>%lu unknown fec_id type:%d\n",
+                                    LocalNodeId(), GetId(), fecId);
+            break;
+    }  // end switch (fecId)
+    PLOG(PL_ERROR, "NormSenderNode::GetFtiData() node>%lu sender>%lu unknown fec_id type:%d\n",
+                        LocalNodeId(), GetId(), fecId);
+    return false;
+}  // end NormSenderNode::GetFtiData()
+
 void NormSenderNode::HandleObjectMessage(const NormObjectMsg& msg)
 {
     UINT8 grttQuantized = msg.GetGrtt();
@@ -1236,6 +1366,9 @@ void NormSenderNode::HandleObjectMessage(const NormObjectMsg& msg)
     
     NormBlockId blockId;
     NormSegmentId segmentId;
+    NormFtiData ftiData;
+    bool noFTI = true;
+    
     if (NormMsg::INFO == msgType)
     {
         fec_id = fecId;
@@ -1261,80 +1394,21 @@ void NormSenderNode::HandleObjectMessage(const NormObjectMsg& msg)
                     LocalNodeId(), GetId());
             // Currently,, our implementation requires the FEC Object Transmission Information
             // to properly allocate resources for FEC buffering and decoding
-            UINT16 fecInstanceId = 0;
-            UINT8 fecM = 8;
-            UINT16 segmentSize = 0;
-            UINT16 fecMaxBlockLen = 0;
-            UINT16 fecNumParity = 0;
-            bool noFTI = true;
-            switch (fecId)
+            // So, get the FEC Transport Information (FTI) from header extension
+            // TBD - allow for application preset FTI
+            if (GetFtiData(msg, ftiData))
             {
-                case 2:
-                {
-                    NormFtiExtension2 fti;
-                    while (msg.GetNextExtension(fti))
-                    {
-                        if (NormHeaderExtension::FTI == fti.GetType())
-                        {
-                            ASSERT(1 == fti.GetFecGroupSize());  // TBD - allow for different groupings
-                            fecM = fti.GetFecFieldSize();
-                            segmentSize = fti.GetSegmentSize();
-                            fecMaxBlockLen = fti.GetFecMaxBlockLen();
-                            fecNumParity = fti.GetFecNumParity();
-                            noFTI = false;
-                            break;
-                        }
-                    }
-                    break;
-                }
-                case 5:
-                {
-                    NormFtiExtension5 fti;
-                    while (msg.GetNextExtension(fti))
-                    {
-                        if (NormHeaderExtension::FTI == fti.GetType())
-                        {
-                            segmentSize = fti.GetSegmentSize();
-                            fecMaxBlockLen = fti.GetFecMaxBlockLen();
-                            fecNumParity = fti.GetFecNumParity();
-                            noFTI = false;
-                            break;
-                        }
-                    }
-                    break;
-                }
-                case 129:
-                {
-                    NormFtiExtension129 fti;
-                    while (msg.GetNextExtension(fti))
-                    {
-                        if (NormHeaderExtension::FTI == fti.GetType())
-                        {
-                            fecInstanceId = fti.GetFecInstanceId();
-                            segmentSize = fti.GetSegmentSize();
-                            fecMaxBlockLen = fti.GetFecMaxBlockLen();
-                            fecNumParity = fti.GetFecNumParity();
-                            noFTI = false;
-                            break;
-                        }
-                    }
-                    break;
-                }
-                default:   
-                    PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu unknown fec_id type:%d\n",
-                                LocalNodeId(), GetId(), fecId);
-                    return;
-                
-            }  // end switch (fecId)
-            
-            if (noFTI)
+                noFTI = false;
+            }
+            else
             {
                 PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu - no FTI provided!\n",
                          LocalNodeId(), GetId());
                 // (TBD) notify app of error ??
                 return;  
             }
-            if (!AllocateBuffers(fecId, fecInstanceId, fecM, segmentSize, fecMaxBlockLen, fecNumParity))
+            if (!AllocateBuffers(fecId, ftiData.GetFecInstanceId(), ftiData.GetFecFieldSize(), 
+                                 ftiData.GetSegmentSize(), ftiData.GetFecMaxBlockLen(), ftiData.GetFecNumParity()))
             {
                 PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu buffer allocation error\n",
                         LocalNodeId(), GetId());
@@ -1378,7 +1452,7 @@ void NormSenderNode::HandleObjectMessage(const NormObjectMsg& msg)
             return;   
         }
     }    
-    
+    bool presetStream = false;
     NormObject* obj = NULL;
     switch (status)
     {
@@ -1389,10 +1463,52 @@ void NormSenderNode::HandleObjectMessage(const NormObjectMsg& msg)
         {
             if (msg.FlagIsSet(NormObjectMsg::FLAG_STREAM))
             {
-                if (!(obj = new NormStreamObject(session, this, objectId)))
+                if (NULL != preset_stream)
                 {
-                    PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() new NORM_OBJECT_STREAM error: %s\n",
-                            GetErrorString());
+                    obj = static_cast<NormObject*>(preset_stream);
+                    // Validate FTI params
+                    if (noFTI)
+                    {
+                        // need to get FTI data
+                        if (!GetFtiData(msg, ftiData))
+                        {
+                            PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu - no FTI provided!\n",
+                                           LocalNodeId(), GetId());
+                            // (TBD) notify app of error ??
+                            return;  
+                        }
+                        else
+                        {
+                            noFTI = false;
+                        }
+                    }
+                    if ((obj->GetSize() != ftiData.GetObjectSize()) ||
+                        (obj->GetFecId() != fecId) ||
+                        (obj->GetSegmentSize() != ftiData.GetSegmentSize()) || 
+                        (obj->GetFecMaxBlockLen() != ftiData.GetFecMaxBlockLen()) ||
+                        (obj->GetFecNumParity() != ftiData.GetFecNumParity()) ||
+                        (obj->GetFecFieldSize() != ftiData.GetFecFieldSize()))
+                    {
+                        PLOG(PL_WARN, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu - FTI does not match preset_stream!\n",
+                                           LocalNodeId(), GetId());
+                        obj = NULL;
+                    }
+                    else
+                    {
+                        // Init preset_stream objectId and INFO status
+                        obj->SetId(objectId);
+                        if (!msg.FlagIsSet(NormObjectMsg::FLAG_INFO))
+                            obj->ClearInfo();
+                        presetStream = true;
+                    }
+                }
+                if (NULL == obj) 
+                {
+                    if (NULL == (obj = new NormStreamObject(session, this, objectId)))
+                    {
+                        PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() new NORM_OBJECT_STREAM error: %s\n",
+                                        GetErrorString());
+                    }
                 }
             }
             else if (msg.FlagIsSet(NormObjectMsg::FLAG_FILE))
@@ -1424,118 +1540,59 @@ void NormSenderNode::HandleObjectMessage(const NormObjectMsg& msg)
                 ASSERT(rx_table.CanInsert(objectId));
                 ASSERT(rx_pending_mask.Test(objectId));
                 rx_table.Insert(obj);
-                UINT8 fecId = msg.GetFecId();
-                UINT8 fecM = 8;
-                UINT16 segmentSize = 0;
-                UINT16 fecMaxBlockLen = 0;
-                UINT16 fecNumParity = 0;
-                NormObjectSize objectSize;
-                bool noFTI = true;
-                switch (fecId)
-                {
-                    case 2:
-                    {
-                        NormFtiExtension2 fti;
-                        while (msg.GetNextExtension(fti))
-                        {
-                            if (NormHeaderExtension::FTI == fti.GetType())
-                            {
-                                ASSERT(1 == fti.GetFecGroupSize());  // TBD - allow for different groupings
-                                fecM = fti.GetFecFieldSize();
-                                segmentSize = fti.GetSegmentSize();
-                                fecMaxBlockLen = fti.GetFecMaxBlockLen();
-                                fecNumParity = fti.GetFecNumParity();
-                                objectSize = fti.GetObjectSize();
-                                noFTI = false;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                    case 5:
-                    {
-                        NormFtiExtension5 fti;
-                        while (msg.GetNextExtension(fti))
-                        {
-                            if (NormHeaderExtension::FTI == fti.GetType())
-                            {
-                                segmentSize = fti.GetSegmentSize();
-                                fecMaxBlockLen = fti.GetFecMaxBlockLen();
-                                fecNumParity = fti.GetFecNumParity();
-                                objectSize = fti.GetObjectSize();
-                                noFTI = false;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                    case 129:
-                    {
-                        NormFtiExtension129 fti;
-                        while (msg.GetNextExtension(fti))
-                        {
-                            if (NormHeaderExtension::FTI == fti.GetType())
-                            {
-                                segmentSize = fti.GetSegmentSize();
-                                fecMaxBlockLen = fti.GetFecMaxBlockLen();
-                                fecNumParity = fti.GetFecNumParity();
-                                objectSize = fti.GetObjectSize();
-                                noFTI = false;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                    default:   
-                        segmentSize = fecMaxBlockLen = fecNumParity = 0;
-                        PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu unknown fec_id type:%d\n",
-                                    LocalNodeId(), GetId(), fecId);
-                        return;
-
-                }  // end switch (fecId)
-                
-                if (noFTI)
+                // Pull out FTI parameters from header extension if we didn't get it above
+                if (noFTI && !GetFtiData(msg, ftiData))
                 {
                     PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu "
                                 "new obj>%hu - no FTI provided!\n", LocalNodeId(), GetId(), (UINT16)objectId);
-                    DeleteObject(obj);
+                    if (!presetStream) DeleteObject(obj);
                     obj = NULL;
                 }
-                else if (obj->RxOpen(objectSize, 
-                                     msg.FlagIsSet(NormObjectMsg::FLAG_INFO),
-                                     segmentSize, 
-                                     fecId, 
-                                     fecM,
-                                     fecMaxBlockLen,
-                                     fecNumParity))
+                else 
                 {
-                    session.Notify(NormController::RX_OBJECT_NEW, this, obj);
-                    if (obj->Accepted())
+                    if (presetStream || 
+                        obj->RxOpen(ftiData.GetObjectSize(), 
+                                    msg.FlagIsSet(NormObjectMsg::FLAG_INFO),
+                                    ftiData.GetSegmentSize(), 
+                                    fecId, 
+                                    ftiData.GetFecFieldSize(),
+                                    ftiData.GetFecMaxBlockLen(),
+                                    ftiData.GetFecNumParity()))
                     {
-                        if (obj->IsStream()) 
+                        session.Notify(NormController::RX_OBJECT_NEW, this, obj);
+                        if (obj->Accepted())
                         {
-                            // This initial "StreamUpdateStatus()" syncs the stream according to our sync policy
-                            NormStreamObject* stream = static_cast<NormStreamObject*>(obj);
-                            if (SYNC_CURRENT != sync_policy)
-                                stream->StreamResync(NormBlockId(0));
+                            if (obj->IsStream()) 
+                            {
+                                if (presetStream) preset_stream = NULL;  // we're using it up
+                                // This initial "StreamUpdateStatus()" syncs the stream according to our sync policy
+                                NormStreamObject* stream = static_cast<NormStreamObject*>(obj);
+                                if (SYNC_CURRENT != sync_policy)
+                                    stream->StreamResync(NormBlockId(0));
+                                else
+                                    stream->StreamUpdateStatus(blockId);
+                                
+                            }    
+                            PLOG(PL_DETAIL, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu new obj>%hu\n", 
+                                LocalNodeId(), GetId(), (UINT16)objectId);
+                        }
+                        else
+                        {
+                            PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() object not accepted\n");
+                            if (presetStream) 
+                                rx_table.Remove(obj);
                             else
-                                stream->StreamUpdateStatus(blockId);
-                        }    
-                        PLOG(PL_DETAIL, "NormSenderNode::HandleObjectMessage() node>%lu sender>%lu new obj>%hu\n", 
-                            LocalNodeId(), GetId(), (UINT16)objectId);
+                                DeleteObject(obj);
+                            obj = NULL;    
+                        }
+                        
                     }
-                    else
+                    else        
                     {
-                        PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() object not accepted\n");
+                        PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() error opening object\n");
                         DeleteObject(obj);
-                        obj = NULL;    
+                        obj = NULL;   
                     }
-                }
-                else        
-                {
-                    PLOG(PL_ERROR, "NormSenderNode::HandleObjectMessage() error opening object\n");
-                    DeleteObject(obj);
-                    obj = NULL;   
                 }
             }
             break;
@@ -2580,7 +2637,7 @@ bool NormSenderNode::OnCCTimeout(ProtoTimer& /*theTimer*/)
     // Build and send NORM_ACK(CC)
     if (ack_pending && (1 == cc_timer.GetRepeatCount()))
     {
-        // Send ACK flush right away (CC feedback is included
+        // Send ACK flush right away (CC feedback is included)
         if (ack_timer.IsActive()) ack_timer.Deactivate();
         if (cc_timer.IsActive()) cc_timer.Deactivate();  // will be reactivated if needed
         OnAckTimeout(ack_timer);

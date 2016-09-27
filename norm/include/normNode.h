@@ -291,6 +291,12 @@ class NormSenderNode : public NormNode
         void SetInstanceId(UINT16 instanceId)
             {instance_id = instanceId;}
         
+        bool PreallocateRxStream(unsigned int bufferSize,
+                                 UINT16       segmentSize  ,     
+                                 UINT16       numData,           
+                                 UINT16       numParity);
+        bool GetFtiData(const NormObjectMsg& msg, NormFtiData& ftiData);         
+        
         // Parameters
         NormObject::NackingMode GetDefaultNackingMode() const 
             {return default_nacking_mode;}
@@ -317,6 +323,7 @@ class NormSenderNode : public NormNode
         
         void UpdateGrttEstimate(UINT8 grttQuantized);
         double GetGrttEstimate() const {return grtt_estimate;}
+        void ResetGrttNotification() {notify_on_grtt_update = true;}
         
         bool UpdateLossEstimate(const struct timeval&   currentTime,
                                 unsigned short          theSequence, 
@@ -380,6 +387,15 @@ class NormSenderNode : public NormNode
         void AbortObject(NormObject* obj);
         
         void DeleteObject(NormObject* obj);
+        
+        NormObject* GetNextPendingObject()
+        {
+            NormObjectId objid;
+            if (GetNextPending(objid))
+                return rx_table.Find(objid);
+            else
+                return NULL;
+        }        
         
         UINT16 SegmentSize() {return segment_size;}
         UINT16 BlockSize() {return ndata;}
@@ -540,6 +556,7 @@ class NormSenderNode : public NormNode
         UINT8                   fec_m;
         unsigned int            ndata;
         unsigned int            nparity;
+        NormStreamObject*       preset_stream;
         
         NormObjectTable         rx_table;
         ProtoSlidingMask        rx_pending_mask;
@@ -561,7 +578,7 @@ class NormSenderNode : public NormNode
         
         // Watermark acknowledgement
         ProtoTimer              ack_timer;
-	bool			ack_pending;
+	    bool			        ack_pending;
         NormObjectId            watermark_object_id;
         NormBlockId             watermark_block_id;
         NormSegmentId           watermark_segment_id;
@@ -574,6 +591,7 @@ class NormSenderNode : public NormNode
         double                  gsize_estimate;
         UINT8                   gsize_quantized;
         double                  backoff_factor;
+        bool                    notify_on_grtt_update;  // for API
         
         // Remote sender congestion control state
         NormLossEstimator2      loss_estimator;
