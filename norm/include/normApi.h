@@ -410,7 +410,8 @@ bool NormStartSender(NormSessionHandle  sessionHandle,
                      UINT32             bufferSpace,
                      UINT16             segmentSize,
                      UINT16             numData,
-                     UINT16             numParity);
+                     UINT16             numParity,
+                     UINT8              fecId = 0);
 
 NORM_API_LINKAGE 
 void NormStopSender(NormSessionHandle sessionHandle);

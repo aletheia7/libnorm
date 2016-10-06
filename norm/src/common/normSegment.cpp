@@ -6,7 +6,6 @@ NormSegmentPool::NormSegmentPool()
 {
 }
 
-
 NormSegmentPool::~NormSegmentPool()
 {
     Destroy();
@@ -342,7 +341,7 @@ bool NormBlock::HandleSegmentRequest(NormSegmentId nextId, NormSegmentId lastId,
                                      UINT16 numData, UINT16 numParity, UINT16 erasureCount)
 {
     PLOG(PL_TRACE, "NormBlock::HandleSegmentRequest() blk>%lu seg>%hu:%hu erasures:%hu\n",
-            (UINT32)blk_id, (UINT16)nextId, (UINT16)lastId, erasureCount);
+                   blk_id.GetValue(), (UINT16)nextId, (UINT16)lastId, erasureCount);
     bool increasedRepair = false;
     if (nextId < numData)
     {
@@ -399,7 +398,7 @@ bool NormBlock::HandleSegmentRequest(NormSegmentId nextId, NormSegmentId lastId,
     return increasedRepair;
 }  // end NormBlock::HandleSegmentRequest()
 
-// (TBD) this should return true is something is appending, false otherwise
+// (TBD) this should return true if something is appended, false otherwise
 bool NormBlock::AppendRepairAdv(NormCmdRepairAdvMsg& cmd, 
                                 NormObjectId         objectId,
                                 bool                 repairInfo,
@@ -523,6 +522,7 @@ bool NormBlock::AppendRepairRequest(NormNackMsg&    nack,
                                     bool            pendingInfo,
                                     UINT16          segmentSize)
 {
+    bool requestAppended = false;
     NormSegmentId nextId = 0;
     NormSegmentId endId;
     if (erasure_count > numParity)
@@ -580,11 +580,13 @@ bool NormBlock::AppendRepairRequest(NormNackMsg&    nack,
                 {
                     if (0 == nack.PackRepairRequest(req))
                     {
+                        prevForm = NormRepairRequest::INVALID;  // so we don't re-attempt pack
                         PLOG(PL_WARN, "NormBlock::AppendRepairRequest() warning: full NACK msg\n");
                         break;   
                     }
+                    requestAppended = true;
                 }
-                nack.AttachRepairRequest(req, segmentSize);            // (TBD) error check
+                nack.AttachRepairRequest(req, segmentSize);  // (TBD) error check
                 req.SetForm(form);
                 prevForm = form;
             }
@@ -614,8 +616,10 @@ bool NormBlock::AppendRepairRequest(NormNackMsg&    nack,
     {
         if (0 == nack.PackRepairRequest(req))
             PLOG(PL_WARN, "NormBlock::AppendRepairRequest() warning: full NACK msg\n");
+        else
+            requestAppended = true;
     }
-    return true;
+    return requestAppended;
 }  // end NormBlock::AppendRepairRequest()
          
 NormBlockPool::NormBlockPool()
@@ -671,7 +675,7 @@ void NormBlockPool::Destroy()
 }  // end NormBlockPool::Destroy()
 
 NormBlockBuffer::NormBlockBuffer()
- : table((NormBlock**)NULL), range_max(0), range(0)
+ : table((NormBlock**)NULL), range_max(0), range(0), fec_block_mask(0)
 {
 }
 
@@ -680,7 +684,7 @@ NormBlockBuffer::~NormBlockBuffer()
     Destroy();
 }
 
-bool NormBlockBuffer::Init(unsigned long rangeMax, unsigned long tableSize)
+bool NormBlockBuffer::Init(unsigned long rangeMax, unsigned long tableSize, INT32 fecBlockMask)
 {
     if (table) Destroy();
     // Make sure tableSize is greater than 0 and 2^n
@@ -700,6 +704,7 @@ bool NormBlockBuffer::Init(unsigned long rangeMax, unsigned long tableSize)
     hash_mask = tableSize - 1;
     range_max = rangeMax;
     range = 0;
+    fec_block_mask = fecBlockMask;
     return true;
 }  // end NormBlockBuffer::Init()
 
@@ -725,10 +730,11 @@ NormBlock* NormBlockBuffer::Find(const NormBlockId& blockId) const
 {
     if (range)
     {
-        if ((blockId < range_lo)  || (blockId > range_hi)) 
+        //if ((blockId < range_lo)  || (blockId > range_hi)) 
+        if ((Compare(blockId, range_lo) < 0) || (Compare(blockId, range_hi) > 0))
             return (NormBlock*)NULL;
-        NormBlock* theBlock = table[((UINT32)blockId) & hash_mask];
-        while (theBlock && (blockId != theBlock->GetId())) 
+        NormBlock* theBlock = table[(blockId.GetValue()) & hash_mask];
+        while ((NULL != theBlock) && (blockId != theBlock->GetId())) 
             theBlock = theBlock->next;
         return theBlock;
     }
@@ -743,16 +749,18 @@ bool NormBlockBuffer::CanInsert(NormBlockId blockId) const
 {
     if (0 != range)
     {
-        if (blockId < range_lo)
+        // if (blockId < range_lo)
+        if (Compare(blockId, range_lo) < 0)
         {
-            if ((range_lo - blockId + range) > range_max)
+            if (((UINT32)Difference(range_lo, blockId) + range) > range_max)
                 return false;
             else
                 return true;
         }
-        else if (blockId > range_hi)
+        // else if (blockId > range_hi)
+        else if (Compare(blockId, range_hi) > 0)
         {
-            if ((blockId - range_hi + range) > range_max)
+            if (((UINT32)Difference(blockId, range_hi) + range) > range_max)
                 return false;
             else
                 return true;
@@ -777,24 +785,27 @@ bool NormBlockBuffer::Insert(NormBlock* theBlock)
         range_lo = range_hi = blockId;
         range = 1;   
     }
-    if (blockId < range_lo)
+    // if (blockId < range_lo)
+    if (Compare(blockId, range_lo) < 0)
     {
-        UINT32 newRange = range_lo - blockId + range;
+        UINT32 newRange = (UINT32)Difference(range_lo, blockId) + range;
         if (newRange > range_max) return false;
         range_lo = blockId;
         range = newRange;
     }
-    else if (blockId > range_hi)
+    // else if (blockId > range_hi)
+    else if (Compare(blockId, range_hi) > 0)
     {            
-        UINT32 newRange = blockId - range_hi + range;
+        UINT32 newRange = (UINT32)Difference(blockId, range_hi) + range;
         if (newRange > range_max) return false;
         range_hi = blockId;
         range = newRange;
     }
-    UINT32 index = ((UINT32)blockId) & hash_mask;
+    UINT32 index = blockId.GetValue() & hash_mask;
     NormBlock* prev = NULL;
     NormBlock* entry = table[index];
-    while (entry && (entry->GetId() < blockId)) 
+    // while (entry && (entry->GetId() < blockId)) 
+    while ((NULL != entry) && (Compare(entry->GetId(), blockId) < 0))
     {
         prev = entry;
         entry = entry->next;
@@ -816,8 +827,10 @@ bool NormBlockBuffer::Remove(const NormBlock* theBlock)
     if (range)
     {
         const NormBlockId& blockId = theBlock->GetId();
-        if ((blockId < range_lo) || (blockId > range_hi)) return false;
-        UINT32 index = ((UINT32)blockId) & hash_mask;
+        // if ((blockId < range_lo) || (blockId > range_hi)) 
+        if ((Compare(blockId, range_lo) < 0) || (Compare(blockId, range_hi) > 0))
+            return false;
+        UINT32 index = blockId.GetValue() & hash_mask;
         NormBlock* prev = NULL;
         NormBlock* entry = table[index];
         while (entry && (entry->GetId() != blockId))
@@ -825,8 +838,8 @@ bool NormBlockBuffer::Remove(const NormBlock* theBlock)
             prev = entry;
             entry = entry->next;
         }
-        if (!entry) return false;
-        if (prev)
+        if (NULL == entry) return false;
+        if (NULL != prev)
             prev->next = entry->next;
         else
             table[index] = entry->next;
@@ -835,7 +848,7 @@ bool NormBlockBuffer::Remove(const NormBlock* theBlock)
         {
             if (blockId == range_lo)
             {
-                // Find next entry for range_lo
+                // Find next entry for new range_lo
                 UINT32 i = index;
                 UINT32 endex;
                 if (range <= hash_mask)
@@ -849,29 +862,33 @@ bool NormBlockBuffer::Remove(const NormBlock* theBlock)
                 {
                     ++i &= hash_mask;
                     offset++;
-                    if ((entry = table[i]))
+                    if (NULL != (entry = table[i]))
                     {
-                        //NormBlockId id = (UINT32)index + offset;
-                        NormBlockId id = (UINT32)blockId + offset;
+                        // NormBlockId id = blockId + offset;
+                        NormBlockId id = blockId;
+                        Increment(id, offset);
                         while(entry && (entry->GetId() != id)) 
                         {
-                            if ((entry->GetId() > blockId) && 
-                                (entry->GetId() < nextId)) nextId = entry->GetId();
+                            // if ((entry->GetId() > blockId) && (entry->GetId() < nextId)
+                            if ((Compare(entry->GetId(), blockId) > 0) &&
+                                (Compare(entry->GetId(), nextId) < 0))
+                            { 
+                                nextId = entry->GetId();
+                            }
                             entry = entry->next;
-                               
                         }
-                        if (entry) break;    
+                        if (NULL != entry) break;    
                     }
                 } while (i != endex);
-                if (entry)
+                if (NULL != entry)
                     range_lo = entry->GetId();
                 else
                     range_lo = nextId;
-                range = range_hi - range_lo + 1; 
+                range = (UINT32)Difference(range_hi, range_lo) + 1; 
             }
             else if (blockId == range_hi)
             {
-                // Find prev entry for range_hi
+                // Find prev entry for new range_hi
                 UINT32 i = index;
                 UINT32 endex;
                 if (range <= hash_mask)
@@ -880,7 +897,6 @@ bool NormBlockBuffer::Remove(const NormBlock* theBlock)
                     endex = index;
                 entry = NULL;
                 UINT32 offset = 0;
-                //printf("preving i:%lu endex:%lu lo:%lu hi:%lu\n", i, endex, (UINT32)range_lo, (UINT32) range_hi);
                 NormBlockId prevId = range_lo;
                 do
                 {
@@ -888,23 +904,27 @@ bool NormBlockBuffer::Remove(const NormBlock* theBlock)
                     offset++;
                     if ((entry = table[i]))
                     {
-                        //NormBlockId id = (UINT32)index - offset;
-                        NormBlockId id = (UINT32)blockId - offset;
-                        //printf("Looking for id:%lu at index:%lu\n", (UINT32)id, i);
+                        // NormBlockId id = blockId - offset;
+                        NormBlockId id = blockId;
+                        Decrement(id, offset);
                         while(entry && (entry->GetId() != id)) 
                         {
-                            if ((entry->GetId() < blockId) && 
-                                (entry->GetId() > prevId)) prevId = entry->GetId();
+                            // if ((entry->GetId() < blockId) && (entry->GetId() > prevId)) 
+                            if ((Compare(entry->GetId(), blockId) < 0) && 
+                                (Compare(entry->GetId(), prevId) > 0))
+                            {  
+                                prevId = entry->GetId();
+                            }
                             entry = entry->next;
                         }
-                        if (entry) break;    
+                        if (NULL != entry) break;    
                     }
                 } while (i != endex);
-                if (entry)
+                if (NULL != entry)
                     range_hi = entry->GetId();
                 else 
                     range_hi = prevId;
-                range = range_hi - range_lo + 1;
+                range = (UINT32)Difference(range_hi, range_lo) + 1;
             } 
         }
         else
@@ -941,30 +961,38 @@ NormBlock* NormBlockBuffer::Iterator::GetNextBlock()
     }
     else
     {
-        if (buffer.range && 
-            (index < buffer.range_hi) && 
-            (index >= buffer.range_lo))
+        // if (buffer.range && (index < buffer.range_hi) &&  (index >= buffer.range_lo))
+        if ((0 != buffer.range) &&
+            (buffer.Compare(index, buffer.range_hi) < 0) &&
+            (buffer.Compare(index, buffer.range_lo) >= 0))
         {
             // Find next entry _after_ current "index"
-            UINT32 i = index;
+            UINT32 i = index.GetValue();;
             UINT32 endex;
-            if ((UINT32)(buffer.range_hi - index) <= buffer.hash_mask)
-                endex = buffer.range_hi & buffer.hash_mask;
+            // if ((UINT32)(buffer.range_hi - index) <= buffer.hash_mask)
+            if ((UINT32)buffer.Difference(buffer.range_hi, index) <= buffer.hash_mask)
+                endex = buffer.range_hi.GetValue() & buffer.hash_mask;
             else
-                endex = index;
+                endex = index.GetValue();
             UINT32 offset = 0;
             NormBlockId nextId = buffer.range_hi;
             do
             {
                 ++i &= buffer.hash_mask;
                 offset++;
-                NormBlockId id = (UINT32)index + offset;
+                // NormBlockId id = (UINT32)index + offset;
+                NormBlockId id = index;
+                buffer.Increment(id, offset);
                 ASSERT(i < 256);
                 NormBlock* entry = buffer.table[i];
                 while ((NULL != entry ) && (entry->GetId() != id)) 
                 {
-                    if ((entry->GetId() > index) && (entry->GetId() < nextId))
+                    // if ((entry->GetId() > index) && (entry->GetId() < nextId))
+                    if ((buffer.Compare(entry->GetId(), index) > 0) && 
+                        (buffer.Compare(entry->GetId(), nextId) < 0))
+                    {
                         nextId = entry->GetId();
+                    }
                     entry = NormBlockBuffer::Next(entry);
                 }
                 if (entry)

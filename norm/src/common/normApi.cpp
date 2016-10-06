@@ -1447,7 +1447,8 @@ bool NormStartSender(NormSessionHandle  sessionHandle,
                      UINT32             bufferSpace,
                      UINT16             segmentSize,
                      UINT16             numData,
-                     UINT16             numParity)
+                     UINT16             numParity,
+                     UINT8              fecId)
 {
     bool result = false;
     NormInstance* instance = NormInstance::GetInstanceFromSession(sessionHandle);
@@ -1455,7 +1456,7 @@ bool NormStartSender(NormSessionHandle  sessionHandle,
     {
         NormSession* session = (NormSession*)sessionHandle;
         if (session)
-            result = session->StartSender(sessionId, bufferSpace, segmentSize, numData, numParity);
+            result = session->StartSender(sessionId, bufferSpace, segmentSize, numData, numParity, fecId);
         else
             result = false;
         instance->dispatcher.ResumeThread();

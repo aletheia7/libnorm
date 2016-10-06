@@ -341,7 +341,8 @@ class NormSession
                          UINT32         bufferSpace,
                          UINT16         segmentSize,
                          UINT16         numData,
-                         UINT16         numParity);
+                         UINT16         numParity,
+                         UINT8          fecId = 0);
         void StopSender();
         void SetTxOnly(bool txOnly, bool connectToSessionAddress = false);
         bool GetTxOnly() const
@@ -413,6 +414,13 @@ class NormSession
         UINT16 SenderExtraParity() const {return extra_parity;}
         void SenderSetExtraParity(UINT16 extraParity)
             {extra_parity = extraParity;}
+        
+        INT32 Difference(NormBlockId a, NormBlockId b) const
+            {return NormBlockId::Difference(a, b, fec_block_mask);}
+        int Compare(NormBlockId a, NormBlockId b) const
+            {return NormBlockId::Compare(a, b, fec_block_mask);}
+        void Increment(NormBlockId& b, UINT32 i = 1) const
+            {b.Increment(i, fec_block_mask);}
         
         
         // EMCON Sender (useful when there are silent receivers)
@@ -697,6 +705,7 @@ class NormSession
         NormEncoder*                    encoder;
         UINT8                           fec_id;
         UINT8                           fec_m;
+        INT32                           fec_block_mask;
         
         NormObjectId                    next_tx_object_id;
         unsigned int                    tx_cache_count_min;

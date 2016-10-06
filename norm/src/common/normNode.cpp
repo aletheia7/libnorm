@@ -1665,7 +1665,7 @@ bool NormSenderNode::SyncTest(const NormObjectMsg& msg) const
             bool result = msg.FlagIsSet(NormObjectMsg::FLAG_STREAM);
             // Allow sync on INFO or block zero DATA message 
             result = result || (NormMsg::INFO == msg.GetType()) ? 
-                                    true : (0 == ((const NormDataMsg&)msg).GetFecBlockId(fec_m));
+                                    true : (NormBlockId(0) == ((const NormDataMsg&)msg).GetFecBlockId(fec_m));
             // Never sync on repair messages
             result = result && !msg.FlagIsSet(NormObjectMsg::FLAG_REPAIR);
             return result;
@@ -2334,7 +2334,9 @@ bool NormSenderNode::OnRepairTimeout(ProtoTimer& /*theTimer*/)
                         holdoffInterval += grtt_estimate;
                     }
                 }
-                //holdoffInterval = (backoff_factor > 0.0) ? holdoffInterval : 1.0*grtt_estimate;
+                // Uncommenting the line below treats ((0 == nparity) && 0.0 == backoff_factor)
+                // as a special case (assumes zero sender aggregateInterval)
+                holdoffInterval = ((0 != nparity) || (backoff_factor > 0.0)) ? holdoffInterval : grtt_estimate;
                 repair_timer.SetInterval(holdoffInterval);
                 PLOG(PL_DEBUG, "NormSenderNode::OnRepairTimeout() node>%lu begin NACK hold-off: %lf sec ...\n",
                          LocalNodeId(), holdoffInterval);
@@ -2728,7 +2730,7 @@ bool NormSenderNode::OnAckTimeout(ProtoTimer& /*theTimer*/)
             blockLen = ndata;
         else
             blockLen = watermark_segment_id;
-        ack->SetFecPayloadId(fec_id, watermark_block_id, watermark_segment_id, blockLen, fec_m);
+        ack->SetFecPayloadId(fec_id, watermark_block_id.GetValue(), watermark_segment_id, blockLen, fec_m);
         
         if (unicast_nacks)
             ack->SetDestination(GetAddress());

@@ -703,7 +703,8 @@ bool NormSession::StartSender(UINT16        instanceId,
                               UINT32        bufferSpace,
                               UINT16        segmentSize,
                               UINT16        numData, 
-                              UINT16        numParity)
+                              UINT16        numParity,
+                              UINT8         fecId)
 {
     if (!IsOpen())
     {
@@ -778,7 +779,10 @@ bool NormSession::StartSender(UINT16        instanceId,
                 StopSender();
                 return false;
             } 
-            fec_id = 5;
+            if (0 != fecId)
+                fec_id = fecId;
+            else
+                fec_id = 5;
             fec_m = 8;
 #endif      
         }
@@ -790,6 +794,7 @@ bool NormSession::StartSender(UINT16        instanceId,
                 StopSender();
                 return false;
             } 
+            // Investigate if fec_id == 129 can also support 16-bit Reed Solomon
             fec_id = 2;
             fec_m = 16;
         }
@@ -810,7 +815,10 @@ bool NormSession::StartSender(UINT16        instanceId,
     else
     {
         // for now use RS8 fec_id with no parity (TBD - support "compact" null FEC type)
-        fec_id = 5;
+        if (0 != fecId)
+            fec_id = fecId;
+        else
+            fec_id = 5;
         fec_m = 8;
     }
     
@@ -1080,7 +1088,8 @@ void NormSession::Serve()
             
             if ((tx_repair_object_min < nextObjectId) ||
                 ((tx_repair_object_min == nextObjectId) &&
-                 ((tx_repair_block_min < nextBlockId) ||
+                 //((tx_repair_block_min < nextBlockId) ||
+                 ((Compare(tx_repair_block_min, nextBlockId) < 0) ||
                   ((tx_repair_block_min == nextBlockId) &&
                    (tx_repair_segment_min < nextSegmentId)))))
             {
@@ -1088,14 +1097,15 @@ void NormSession::Serve()
                 nextBlockId = tx_repair_block_min;
                 nextSegmentId = tx_repair_segment_min;
                 PLOG(PL_DETAIL, "watermark>%hu:%lu:%hu check against repair index>%hu:%lu:%hu\n",
-                       (UINT16)watermark_object_id, (UINT32)watermark_block_id, (UINT16)watermark_segment_id, 
-                       (UINT16)nextObjectId, (UINT32)nextBlockId, (UINT16)nextSegmentId);
+                       (UINT16)watermark_object_id, watermark_block_id.GetValue(), (UINT16)watermark_segment_id, 
+                       (UINT16)nextObjectId, nextBlockId.GetValue(), (UINT16)nextSegmentId);
             }
         }  // end if (tx_repair_pending)
         
         if ((nextObjectId > watermark_object_id) ||
             ((nextObjectId == watermark_object_id) &&
-             ((nextBlockId > watermark_block_id) ||
+             //((nextBlockId > watermark_block_id) ||
+             ((Compare(nextBlockId, watermark_block_id) > 0) ||
               ((nextBlockId == watermark_block_id) &&
                 (nextSegmentId > watermark_segment_id)))))
         {
@@ -1463,7 +1473,7 @@ bool NormSession::SenderQueueWatermarkFlush()
         else
             blockLen = watermark_segment_id;
         
-        flush->SetFecPayloadId(fec_id, watermark_block_id, watermark_segment_id, blockLen, fec_m);
+        flush->SetFecPayloadId(fec_id, watermark_block_id.GetValue(), watermark_segment_id, blockLen, fec_m);
         
         NormNodeTreeIterator iterator(acking_node_tree);
         NormAckingNode* next;
@@ -1581,7 +1591,7 @@ void NormSession::SenderQueueFlush()
             flush->SetGroupSize(gsize_quantized);
             flush->SetObjectId(objectId);
             
-            flush->SetFecPayloadId(fec_id, blockId, segmentId, obj->GetBlockSize(blockId), fec_m);
+            flush->SetFecPayloadId(fec_id, blockId.GetValue(), segmentId, obj->GetBlockSize(blockId), fec_m);
             
             QueueMessage(flush);
             if ((GetTxRobustFactor() < 0) || (flush_count < GetTxRobustFactor())) 
@@ -2397,7 +2407,7 @@ void NormTrace(const struct timeval&    currentTime,
                     seq, 
                     //data.IsData() ? "DATA" : "PRTY",
                     (UINT16)data.GetObjectId(),
-                    (UINT32)data.GetFecBlockId(fecM),  
+                    data.GetFecBlockId(fecM).GetValue(),  
                     (UINT16)data.GetFecSymbolId(fecM));
             
             if (data.IsStream())
@@ -2441,7 +2451,7 @@ void NormTrace(const struct timeval&    currentTime,
                         static_cast<const NormCmdSquelchMsg&>(msg);
                     PLOG(PL_ALWAYS, " obj>%hu blk>%lu seg>%hu ",
                             (UINT16)squelch.GetObjectId(),
-                            (UINT32)squelch.GetFecBlockId(fecM),
+                            squelch.GetFecBlockId(fecM).GetValue(),
                             (UINT16)squelch.GetFecSymbolId(fecM));
                     break;
                 }
@@ -2451,7 +2461,7 @@ void NormTrace(const struct timeval&    currentTime,
                         static_cast<const NormCmdFlushMsg&>(msg);
                     PLOG(PL_ALWAYS, " obj>%hu blk>%lu seg>%hu ",
                             (UINT16)flush.GetObjectId(),
-                            (UINT32)flush.GetFecBlockId(fecM),  
+                            flush.GetFecBlockId(fecM).GetValue(),  
                             (UINT16)flush.GetFecSymbolId(fecM));
                     
                     if (0 != flush.GetAckingNodeCount())
@@ -2502,7 +2512,7 @@ void NormTrace(const struct timeval&    currentTime,
                     const NormAckFlushMsg& flushAck = static_cast<const NormAckFlushMsg&>(ack);
                     PLOG(PL_ALWAYS, "ACK(FLUSH) obj>%hu blk>%lu seg>%hu ",
                                 (UINT16)flushAck.GetObjectId(),
-                                (UINT32)flushAck.GetFecBlockId(fecM),  
+                                flushAck.GetFecBlockId(fecM).GetValue(),  
                                 (UINT16)flushAck.GetFecSymbolId(fecM));
                 }
                 else if (NormAck::CC == ack.GetAckType())
@@ -3313,7 +3323,7 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
         }
         else if (obj->GetFirstPending(txBlockIndex))
         {
-            txBlockIndex++;
+            Increment(txBlockIndex);
         }
         else
         {
@@ -3494,7 +3504,7 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                         break;
                     case BLOCK:
                         PLOG(PL_DETAIL, "NormSession::SenderHandleNackMessage(BLOCK) obj>%hu blks>%lu:%lu\n", 
-                                (UINT16)nextObjectId, (UINT32)nextBlockId, (UINT32)lastBlockId);
+                                (UINT16)nextObjectId, nextBlockId.GetValue(), lastBlockId.GetValue());
                         inRange = false; // BLOCK requests are processed in one pass
                         // (TBD) if entire object is TxReset(), continue
                         if (object->IsStream())
@@ -3508,9 +3518,11 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                                 // Only lock blocks for which we're going to accept the repair request
                                 if (nextObjectId == txObjectIndex)
                                 {
-                                    if (lastBlockId < txBlockIndex)
+                                    //if (lastBlockId < txBlockIndex)
+                                    if (Compare(lastBlockId, txBlockIndex) < 0)
                                         attemptLock = false;
-                                    else if (nextBlockId < txBlockIndex)
+                                    //else if (nextBlockId < txBlockIndex)
+                                    else if (Compare(nextBlockId, txBlockIndex) < 0)
                                         firstLockId = txBlockIndex;
                                 }
                                 else if (nextObjectId < txObjectIndex)
@@ -3546,9 +3558,11 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                         {
                             if (nextObjectId == txObjectIndex)
                             {
-                                if (nextBlockId >= txBlockIndex)
+                                //if (nextBlockId >= txBlockIndex)
+                                if (Compare(nextBlockId, txBlockIndex) >= 0)
                                     object->TxResetBlocks(nextBlockId, lastBlockId);
-                                else if (lastBlockId >= txBlockIndex)
+                                //else if (lastBlockId >= txBlockIndex)
+                                else if (Compare(lastBlockId, txBlockIndex) >= 0)
                                     object->TxResetBlocks(txBlockIndex, lastBlockId);
                             }
                             else if (nextObjectId > txObjectIndex)
@@ -3574,7 +3588,8 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                                 }
                                 else if (nextObjectId == tx_repair_object_min)
                                 {
-                                    if (nextBlockId <= tx_repair_block_min)
+                                    //if (nextBlockId <= tx_repair_block_min)
+                                    if (Compare(nextBlockId, tx_repair_block_min) <= 0)
                                     {
                                         tx_repair_block_min = nextBlockId;
                                         tx_repair_segment_min = 0;
@@ -3594,8 +3609,7 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                         break;
                     case SEGMENT:
                         PLOG(PL_DETAIL, "NormSession::SenderHandleNackMessage(SEGMENT) obj>%hu blk>%lu segs>%hu:%hu\n", 
-                                (UINT16)nextObjectId, (UINT32)nextBlockId, 
-                                (UINT32)nextSegmentId, (UINT32)lastSegmentId);
+                                (UINT16)nextObjectId, nextBlockId.GetValue(), (UINT32)nextSegmentId, (UINT32)lastSegmentId);
                         inRange = false;  // SEGMENT repairs are also handled in one pass
                         if (nextBlockId != prevBlockId) freshBlock = true;
                         if (freshBlock)
@@ -3622,7 +3636,7 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                                         {
                                             PLOG(PL_DEBUG, "NormSession::SenderHandleNackMessage() node>%lu "
                                                     "recvd repair request for old stream block(%lu) ...\n",
-                                                    LocalNodeId(), (UINT32)nextBlockId);
+                                                    LocalNodeId(), nextBlockId.GetValue());
                                             if (!squelchQueued) 
                                             {
                                                 SenderQueueSquelch(nextObjectId);
@@ -3661,9 +3675,11 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                                 {
                                     if (nextObjectId == txObjectIndex)
                                     {
-                                        if (nextBlockId < txBlockIndex)
+                                        //if (nextBlockId < txBlockIndex)
+                                        if (Compare(nextBlockId, txBlockIndex) < 0)
                                         {
-                                            if (1 == (txBlockIndex - nextBlockId))
+                                            //if (1 == (txBlockIndex - nextBlockId))
+                                            if (1 == (UINT32)Difference(txBlockIndex, nextBlockId))
                                             {
                                                 // We're currently sending this block
                                                 if (block->IsPending())
@@ -3728,11 +3744,13 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                             }
                             else if (nextObjectId == txObjectIndex)
                             {
-                                if (nextBlockId >= txBlockIndex)
+                                //if (nextBlockId >= txBlockIndex)
+                                if (Compare(nextBlockId, txBlockIndex) >= 0)
                                 {
                                     object->TxUpdateBlock(block, nextSegmentId, lastSegmentId, numErasures);   
                                 } 
-                                else if (1 == (txBlockIndex - nextBlockId))
+                                //else if (1 == (txBlockIndex - nextBlockId))
+                                else if (1 == (UINT32)Difference(txBlockIndex, nextBlockId))
                                 {
                                     NormSegmentId firstPending = 0;
                                     if (block->GetFirstPending(firstPending))
@@ -3767,7 +3785,8 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
                                 }
                                 else if (nextObjectId == tx_repair_object_min)
                                 {
-                                    if (nextBlockId < tx_repair_block_min)
+                                    if (Compare(nextBlockId, tx_repair_block_min) < 0)
+                                    //if (nextBlockId < tx_repair_block_min)
                                     {
                                         tx_repair_block_min = nextBlockId;
                                         tx_repair_segment_min = (nextSegmentId < nextBlockSize) ?
@@ -3808,8 +3827,9 @@ void NormSession::SenderHandleNackMessage(const struct timeval& currentTime, Nor
         // BACKOFF related code
         double aggregateInterval = address.IsMulticast() ? 
                                     grtt_advertised * (backoff_factor + 1.0) : 0.0;
-        // backoff == 0.0 is a special case
-        //aggregateInterval = (backoff_factor > 0.0) ? aggregateInterval : 0.0;
+        // Uncommenting the line below treats ((0 == ndata) && 0.0 == backoff_factor)
+        // as a special case (sets zero sender aggregateInterval)
+        aggregateInterval = ((0 != nparity) || (backoff_factor > 0.0)) ? aggregateInterval : 0.0;
         
         // TBD - why did we do this thing here to limit the min aggregateInterval???
         // (I think to allow "11th hour NACKs to be incorporated .. so this should be
@@ -3904,7 +3924,7 @@ bool NormSession::SenderQueueSquelch(NormObjectId objectId)
             ASSERT(NormObject::STREAM == obj->GetType());
             squelch->SetObjectId(objectId);
             NormBlockId blockId = static_cast<NormStreamObject*>(obj)->StreamBufferLo();
-            squelch->SetFecPayloadId(fec_id, blockId, 0, obj->GetBlockSize(blockId), fec_m);
+            squelch->SetFecPayloadId(fec_id, blockId.GetValue(), 0, obj->GetBlockSize(blockId), fec_m);
             while ((obj = iterator.GetNextObject()))
                 if (objectId == obj->GetId()) break;
             nextId = objectId + 1;
@@ -3920,7 +3940,7 @@ bool NormSession::SenderQueueSquelch(NormObjectId objectId)
                    blockId =static_cast<NormStreamObject*>(obj)->StreamBufferLo();
                else
                    blockId = NormBlockId(0);
-               squelch->SetFecPayloadId(fec_id, blockId, 0, obj->GetBlockSize(blockId), fec_m);
+               squelch->SetFecPayloadId(fec_id, blockId.GetValue(), 0, obj->GetBlockSize(blockId), fec_m);
                nextId = obj->GetId() + 1;
             }
             else
@@ -4527,7 +4547,7 @@ NormSession::MessageStatus NormSession::SendMessage(NormMsg& msg)
             if (result)
             {
                 // TBD - is PL_WARN too verbose here
-                PLOG(PL_WARN, "NormSession::SendMessage() sendto(%s/%hu) error: %s\n",
+                PLOG(PL_WARN, "NormSession::SendMessage() sendto(%s/%hu) warning: %s\n",
                         msg.GetDestination().GetHostString(), msg.GetDestination().GetPort(), GetErrorString());
                 return MSG_SEND_BLOCKED;
             }
@@ -5078,7 +5098,7 @@ bool NormSession::OnReportTimeout(ProtoTimer& /*theTimer*/)
     
 #endif // if/else _WIN32_WCE
     ASSERT(NULL != ct);
-    ProtoDebugLevel reportDebugLevel = PL_INFO;
+    ProtoDebugLevel reportDebugLevel = PL_ALWAYS;
     PLOG(reportDebugLevel, "REPORT time>%02d:%02d:%02d.%06lu node>%lu ***************************************\n", 
                   ct->tm_hour, ct->tm_min, ct->tm_sec, currentTime.tv_usec, (unsigned long)LocalNodeId());
     if (IsSender())
@@ -5125,8 +5145,8 @@ bool NormSession::OnReportTimeout(ProtoTimer& /*theTimer*/)
             {
                 NormStreamObject* stream = (NormStreamObject*)obj;
                 PLOG(reportDebugLevel, "   stream_sync_id>%u stream_next_id>%u read_index:%u.%hu\n",
-                              (UINT32)stream->GetSyncId(), (UINT32)stream->GetNextId(), 
-                              (UINT32)stream->GetNextBlockId(), (UINT16)stream->GetNextSegmentId());
+                              stream->GetSyncId().GetValue(), stream->GetNextId().GetValue(), 
+                              stream->GetNextBlockId().GetValue(), (UINT16)stream->GetNextSegmentId());
             }
                     
         }

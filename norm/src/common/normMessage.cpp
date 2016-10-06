@@ -150,10 +150,10 @@ bool NormRepairRequest::AppendRepairItem(UINT8               fecId,
 {
     if (RANGES == form)
         PLOG(PL_TRACE, "NormRepairRequest::AppendRepairItem-Range(fecId>%d obj>%hu blk>%lu seg>%hu) ...\n",
-            fecId, (UINT16)objectId, (UINT32)blockId, (UINT16)symbolId);
+            fecId, (UINT16)objectId, blockId.GetValue(), (UINT16)symbolId);
     else
         PLOG(PL_TRACE, "NormRepairRequest::AppendRepairItem(fecId>%d obj>%hu blk>%lu seg>%hu) ...\n",
-                       fecId, (UINT16)objectId, (UINT32)blockId, (UINT16)symbolId);
+                       fecId, (UINT16)objectId, blockId.GetValue(), (UINT16)symbolId);
     ASSERT(NormPayloadId::IsValid(fecId));
     
     UINT16 itemLength = RepairItemLength(fecId);
@@ -164,7 +164,7 @@ bool NormRepairRequest::AppendRepairItem(UINT8               fecId,
         ((UINT8*)ptr)[RESERVED_OFFSET] = 0;                         // 1 byte
         ((UINT16*)ptr)[OBJ_ID_OFFSET] = htons((UINT16)objectId);    // 2 bytes
         NormPayloadId payloadId(fecId, fecM, ptr + 1);
-        payloadId.SetFecPayloadId(blockId, symbolId, blockLen);
+        payloadId.SetFecPayloadId(blockId.GetValue(), symbolId, blockLen);
         length += itemLength;
         return true;
     }
@@ -186,8 +186,8 @@ bool NormRepairRequest::AppendRepairRange(UINT8                 fecId,
                                           UINT16                endSymbolId)
 {
     PLOG(PL_TRACE, "NormRepairRequest::AppendRepairRange(%hu:%lu:%hu->%hu:%lu:%hu) ...\n",
-            (UINT16)startObjectId, (UINT32)startBlockId, (UINT16)startSymbolId,
-            (UINT16)endObjectId, (UINT32)endBlockId, (UINT16)endSymbolId);
+            (UINT16)startObjectId, startBlockId.GetValue(), (UINT16)startSymbolId,
+            (UINT16)endObjectId, endBlockId.GetValue(), (UINT16)endSymbolId);
     // Note a "range" is two repair items
     UINT16 rangeLength = RepairRangeLength(fecId);
     if (buffer_len >= (ITEM_LIST_OFFSET+length+rangeLength))
@@ -198,14 +198,14 @@ bool NormRepairRequest::AppendRepairRange(UINT8                 fecId,
         ((UINT8*)ptr)[RESERVED_OFFSET] = 0;
         ((UINT16*)ptr)[OBJ_ID_OFFSET] = htons((UINT16)startObjectId);
         NormPayloadId startId(fecId, fecM, ptr + 1);
-        startId.SetFecPayloadId(startBlockId, startSymbolId, startBlockLen);
+        startId.SetFecPayloadId(startBlockId.GetValue(), startSymbolId, startBlockLen);
         // range end
         ptr += (rangeLength/8);  // advance ptr to second part of repair range
         ((UINT8*)ptr)[FEC_ID_OFFSET] = fecId;
         ((UINT8*)ptr)[RESERVED_OFFSET] = 0;
         ((UINT16*)ptr)[OBJ_ID_OFFSET] = htons((UINT16)endObjectId);
         NormPayloadId endId(fecId, fecM, ptr + 1);
-        endId.SetFecPayloadId(endBlockId, endSymbolId, endBlockLen);
+        endId.SetFecPayloadId(endBlockId.GetValue(), endSymbolId, endBlockLen);
         length += rangeLength;
         return true;
     }
@@ -230,7 +230,7 @@ bool NormRepairRequest::AppendErasureCount(UINT8                fecId,
         ((UINT8*)ptr)[RESERVED_OFFSET] = 0;
         ((UINT16*)ptr)[OBJ_ID_OFFSET] = htons((UINT16)objectId);
         NormPayloadId erasureId(fecId, fecM, ptr + 1);
-        erasureId.SetFecPayloadId(blockId, erasureCount, blockLen);
+        erasureId.SetFecPayloadId(blockId.GetValue(), erasureCount, blockLen);
         length += itemLength;
         return true;
     }
@@ -366,18 +366,18 @@ void NormRepairRequest::Log(UINT8 fecId, UINT8 fecM) const
     while (iterator.NextRepairItem(&objId, &blkId, &blkLen, &segId))
     {
         if (FlagIsSet(SEGMENT))
-            PLOG(PL_ALWAYS, "RepairItem> %hu:%lu:%hu", (UINT16)objId, (UINT32)blkId, (UINT16)segId);
+            PLOG(PL_ALWAYS, "RepairItem> %hu:%lu:%hu", (UINT16)objId, blkId.GetValue(), (UINT16)segId);
         else if (FlagIsSet(BLOCK))
-            PLOG(PL_ALWAYS, "RepairItem> %hu:%lu", (UINT16)objId, (UINT32)blkId, (UINT16)segId);
+            PLOG(PL_ALWAYS, "RepairItem> %hu:%lu", (UINT16)objId, blkId.GetValue(), (UINT16)segId);
         else
             PLOG(PL_ALWAYS, "RepairItem> %hu", (UINT16)objId);
         if (form == RANGES)
         {
             iterator.NextRepairItem(&objId, &blkId, &blkLen, &segId);
             if (FlagIsSet(SEGMENT))
-                PLOG(PL_ALWAYS, " -> %hu:%lu:%hu", (UINT16)objId, (UINT32)blkId, (UINT16)segId);
+                PLOG(PL_ALWAYS, " -> %hu:%lu:%hu", (UINT16)objId, blkId.GetValue(), (UINT16)segId);
             else if (FlagIsSet(BLOCK))
-                PLOG(PL_ALWAYS, " -> %hu:%lu", (UINT16)objId, (UINT32)blkId, (UINT16)segId);
+                PLOG(PL_ALWAYS, " -> %hu:%lu", (UINT16)objId, blkId.GetValue(), (UINT16)segId);
             else
                 PLOG(PL_ALWAYS, " -> %hu", (UINT16)objId);
         }

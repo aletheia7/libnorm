@@ -214,7 +214,6 @@ class NormObjectId
         void operator-=(UINT16 delta)
             {value -= delta;}
         
-        
         NormObjectId& operator++(int) {value++; return *this;}
         NormObjectId& operator--(int) {value--; return *this;}
         
@@ -227,14 +226,94 @@ class NormBlockId
     public:
         NormBlockId() {};
         NormBlockId(UINT32 id) {value = id;}
-        NormBlockId(const NormObjectId& id) {value = (UINT32)id;}
-        operator UINT32() const {return value;}
+        //NormBlockId(const NormObjectId& id) {value = (UINT32)id;}
+        
+        UINT32 GetValue() const 
+            {return value;}
+        
+        //operator UINT32() const {return value;}
+        
         bool operator==(const NormBlockId& id) const
-            {return (value == (UINT32)id);}
+            {return (value == id.value);}
         bool operator!=(const NormBlockId& id) const
-            {return (value != (UINT32)id);}
+            {return (value != id.value);}
         
+        // These static helper methods provide a "mask" parameter to allow
+        // for different bit-length NormBlockId values (depends upon FEC encoding scheme).
+        // The "mask" is in the eye-of-the-beholder, i.e., the given NormObject
+        // or NormBlockBuffer that is manipulating block id values for protocol purposes
+        // provide the FEC block "mask" to these methods.
+        // We may reconsider adding the "mask" as a NormBlockId member variable, but since
+        // NormBlockId usage is so ubiquitous, it could be added overhead consider within
+        // the context of sender, object, etc a common fec_block_mask is used.
         
+        // Compute difference of (a - b). If a non-zero bit "mask" is given, the difference
+        // is for the masked word size (e.g., mask = 0x00ffffff is a 24-bit integer).
+        static INT32 Difference(const NormBlockId& a, const NormBlockId& b, INT32 mask)
+        {
+            if (mask)
+            {
+                INT32 sign = (mask ^ (mask >> 1));
+                INT32 result = a.value - b.value;
+                if (0 == (result & sign))
+                    return result & mask;
+                else if ((result != sign) || (a.value < b.value))
+                    return (result | ~mask);
+                else
+                    return result & mask;
+            }
+            else
+            {
+                return ((INT32)(a.value - b.value));
+            }
+        }
+        
+        // Compare two block ids.  If a non-zero bit "mask" is given, the comparison
+        // is a "sliding window" (signed) over the bit space.  Otherwise, it is 
+        // simply an unsigned value comparison.
+        // Returns -1, 0, +1 for (a < b), (a == b), and (a > b), respectively
+        static int Compare(const NormBlockId& a, const NormBlockId& b, INT32 mask)
+        {
+            if (mask)
+            {
+                // "Sliding window" comparison
+                INT32 delta = Difference(a, b, mask);
+                if (delta < 0)
+                    return -1;
+                else if (0 == delta)
+                    return 0;
+                else  // if delta > 0
+                    return 1;
+            }
+            else if (a.value < b.value)
+            {
+                return  -1;
+            }
+            else if (a.value == b.value)
+            {
+                return 0;
+            }
+            else // if (a > b)
+            {
+                return 1;
+            }
+        }
+        
+        void Increment(UINT32 i, INT32 mask)
+        {
+            value = value + i;
+            if (mask) value &= mask;
+        }
+
+         void Decrement(UINT32 i, INT32 mask)
+         {
+             if (mask && (value < i))
+                value = (mask - (i - value) + 1);
+            else
+                value -= i;
+         }
+        
+        /*
         //INT32 operator-(const NormBlockId& id) const
         //    {return ((INT32)value - id.value);}
         
@@ -249,10 +328,8 @@ class NormBlockId
             UINT32 diff = id.value - value;
             return ((diff > 0x80000000) || ((0x80000000 == diff) && (id.value > value)));
         }
-        
-        
         NormBlockId& operator++(int) {value++; return *this;}
-        
+        */
     private:
         UINT32  value;  
 };  // end class NormBlockId
@@ -310,7 +387,7 @@ class NormHeaderExtension
 };  // end class NormHeaderExtension
 
     
-// This class is some we use to set/get
+// This class is what we use to set/get
 // FEC Payload Id content.  The FEC Payload
 // Id format is dependent upon the "fec_id" (FEC Type)
 // and, in some cases, its field size ("m") parameter

@@ -322,7 +322,7 @@ class NormBlockBuffer
             
         NormBlockBuffer();
         ~NormBlockBuffer();
-        bool Init(unsigned long rangeMax, unsigned long tableSize = 256);
+        bool Init(unsigned long rangeMax, unsigned long tableSize, INT32 fecBlockMask);
         void Destroy();
         
         bool Insert(NormBlock* theBlock);
@@ -348,12 +348,22 @@ class NormBlockBuffer
         }; 
             
     private:
+        int Compare(NormBlockId a, NormBlockId b) const
+            {return NormBlockId::Compare(a, b, fec_block_mask);}
+        INT32 Difference(NormBlockId a, NormBlockId b) const
+            {return NormBlockId::Difference(a, b, fec_block_mask);}
+        void Increment(NormBlockId& b, UINT32 i = 1) const
+            {b.Increment(i, fec_block_mask);}
+        void Decrement(NormBlockId& b, UINT32 i = 1) const
+            {b.Decrement(i, fec_block_mask);}
+    
         static NormBlock* Next(NormBlock* b) {return b->next;}    
         
         NormBlock**     table;
         unsigned long   hash_mask;       
         unsigned long   range_max;  // max range of blocks that can be buffered
         unsigned long   range;      // zero if "block buffer" is empty
+        INT32           fec_block_mask;
         NormBlockId     range_lo;
         NormBlockId     range_hi;
 };  // end class NormBlockBuffer

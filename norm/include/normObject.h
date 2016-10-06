@@ -61,6 +61,17 @@ class NormObject
         UINT16 GetFecNumParity() const {return nparity;}
         UINT8 GetFecFieldSize() const {return fec_m;}
         
+        // returns difference (a - b)
+        INT32 Difference(NormBlockId a, NormBlockId b) const
+            {return NormBlockId::Difference(a, b, fec_block_mask);}
+        // returns -1, 0, or 1 for (a < b), (a == b), or (a > b), respectively
+        int Compare(NormBlockId a, NormBlockId b) const
+            {return NormBlockId::Compare(a, b, fec_block_mask);}
+        void Increment(NormBlockId& b, UINT32 i = 1) const
+            {b.Increment(i, fec_block_mask);}
+        void Decrement(NormBlockId& b, UINT32 i = 1) const
+            {b.Decrement(i, fec_block_mask);}
+        
         bool HaveInfo() const {return (info_len > 0);}
         bool HasInfo() const {return (NULL != info_ptr);}
         void ClearInfo()
@@ -133,8 +144,8 @@ class NormObject
         NormBlockId GetFinalBlockId() const {return final_block_id;}
         UINT32 GetBlockSize(NormBlockId blockId) const
         {
-            return (((UINT32)blockId < large_block_count) ? large_block_size : 
-                                                            small_block_size);
+            return ((blockId.GetValue() < large_block_count) ? large_block_size : 
+                                                               small_block_size);
         }
         
         NormObjectSize GetBytesPending() const;
@@ -153,7 +164,7 @@ class NormObject
         }
         bool GetNextPending(NormBlockId& blockId) const
         {
-            UINT32 index = (UINT32)blockId;
+            UINT32 index = blockId.GetValue();
             bool result = pending_mask.GetNextSet(index);
             blockId = NormBlockId(index);
             return result;
@@ -175,7 +186,7 @@ class NormObject
         
         bool GetNextRepair(NormBlockId& blockId) const
         {
-            UINT32 index = (UINT32)blockId;
+            UINT32 index = blockId.GetValue();
             bool result = repair_mask.GetNextSet(index);
             blockId = NormBlockId(index);
             return result;
@@ -209,16 +220,16 @@ class NormObject
             bool result = theBlock->TxUpdate(firstSegmentId, lastSegmentId, 
                                              GetBlockSize(blockId), nparity, 
                                              numErasures);
-            ASSERT(result ? pending_mask.Set(blockId) : true);
-            result = result ? pending_mask.Set(blockId) : false;
+            ASSERT(result ? pending_mask.Set(blockId.GetValue()) : true);
+            result = result ? pending_mask.Set(blockId.GetValue()) : false;
             return result; 
         }  
         bool HandleInfoRequest(bool holdoff);
         bool HandleBlockRequest(NormBlockId nextId, NormBlockId lastId);
         NormBlock* FindBlock(NormBlockId blockId) {return block_buffer.Find(blockId);}
         bool ActivateRepairs();
-        bool IsRepairSet(NormBlockId blockId) {return repair_mask.Test(blockId);}
-        bool IsPendingSet(NormBlockId blockId) {return pending_mask.Test(blockId);}
+        bool IsRepairSet(NormBlockId blockId) {return repair_mask.Test(blockId.GetValue());}
+        bool IsPendingSet(NormBlockId blockId) {return pending_mask.Test(blockId.GetValue());}
         bool AppendRepairAdv(NormCmdRepairAdvMsg& cmd);
         
         NormBlockId GetMaxPendingBlockId() const {return max_pending_block;}
@@ -254,8 +265,8 @@ class NormObject
         void SetRepairInfo() {repair_info = true;}
         bool SetRepairs(NormBlockId first, NormBlockId last)
         {
-            return (first == last) ? repair_mask.Set(first) :
-                                     repair_mask.SetBits(first, repair_mask.Delta(last,first)+1); 
+            return ((first == last) ? repair_mask.Set(first.GetValue()) :
+                                      repair_mask.SetBits(first.GetValue(), repair_mask.Difference(last.GetValue(),first.GetValue())+1)); 
         }
         void SetLastNackTime(const ProtoTime& theTime)
             {last_nack_time = theTime;}
@@ -283,6 +294,7 @@ class NormObject
         UINT16                segment_size;
         UINT8                 fec_id;
         UINT8                 fec_m;
+        INT32                 fec_block_mask;
         UINT16                ndata;
         UINT16                nparity;
         NormBlockBuffer       block_buffer;
@@ -440,7 +452,7 @@ class NormStreamObject : public NormObject
         bool GetPushMode() const {return push_mode;}
         
         bool IsOldBlock(NormBlockId blockId) const
-            {return (!stream_buffer.IsEmpty() && (blockId < stream_buffer.RangeLo()));}
+            {return (!stream_buffer.IsEmpty() && (Compare(blockId, stream_buffer.RangeLo()) < 0));}
 
         bool IsClosing() {return stream_closing;}
         bool HasVacancy() 
@@ -501,12 +513,11 @@ class NormStreamObject : public NormObject
         void Prune(NormBlockId blockId, bool updateStatus);
         
         bool IsFlushPending() {return flush_pending;}
-        NormBlockId FlushBlockId()
-            {return (write_index.segment ? write_index.block : 
-                     (NormBlockId((UINT32)write_index.block-1)));}
-        NormSegmentId FlushSegmentId()
-            {return (write_index.segment ? (write_index.segment-1) : 
-                                           (ndata-1));}
+        
+        NormBlockId FlushBlockId() const;
+        
+        NormSegmentId FlushSegmentId() const
+            {return (write_index.segment ? (write_index.segment-1) : (ndata-1));}
         
         NormBlockId GetNextBlockId() const
             {return (sender ? read_index.block : write_index.block);}

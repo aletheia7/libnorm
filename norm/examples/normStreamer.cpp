@@ -32,6 +32,12 @@ class NormStreamer
             MSG_SIZE_MAX = 65535    // (including length header)  
         };  
             
+        void SetOutputFile(FILE* filePtr)
+        {
+                output_file = filePtr;
+                output_fd = fileno(filePtr);
+        }
+            
         void SetLoopback(bool state)
         {
             loopback = state;
@@ -206,6 +212,7 @@ bool NormStreamer::EnableUdpRelay(const char* relayAddr, unsigned short relayPor
         fprintf(stderr, "normStreamer output_socket open() error: %s\n", GetErrorString());
         return false;
     }
+    output_socket.SetTxBufferSize(6*1024*1024);
     if (!relay_addr.ResolveFromString(relayAddr))
     {
         fprintf(stderr, "normStreamer error: invalid relay address\n");
@@ -223,36 +230,37 @@ bool NormStreamer::EnableUdpListener(unsigned short listenPort, const char* grou
         fprintf(stderr, "normStreamer input_socket open() error: %s\n", GetErrorString());
 		rval = false ;
     }
-	else
-	{
-    if (NULL != groupAddr)
+	else 
     {
-        ProtoAddress addr;
-        if (!addr.ResolveFromString(groupAddr) || (!addr.IsMulticast()))
-        {
-            fprintf(stderr, "normStreamer error: invalid 'listen' group address\n");
-				rval = false ;
+        uint32_t rxSockBufferSize = 6*1024*1024 ;
+	    if (!input_socket.SetRxBufferSize(rxSockBufferSize))
+	    {
+		    fprintf(stderr, "normStreamer failed to set input socket buffer size (%d)\n", rxSockBufferSize);
+		    rval = false ;
         }
-			else
-			{
-				if (!input_socket.JoinGroup(addr, interfaceName))
+        if (NULL != groupAddr)
+        {
+            ProtoAddress addr;
+            if (!addr.ResolveFromString(groupAddr) || (!addr.IsMulticast()))
+            {
+                fprintf(stderr, "normStreamer error: invalid 'listen' group address\n");
+			    rval = false ;
+            }
+		    else
+		    {
+			    if (!input_socket.JoinGroup(addr, interfaceName))
                 {
                     fprintf(stderr, "normStreamer input_socket JoinGroup() error: %s\n", GetErrorString());
 					        rval = false ;
                 }
-				else
-				{
-					fprintf(stderr, "%s:=>normStreamer joined group %s/%d on interface %s\n", __PRETTY_FUNCTION__,  groupAddr, listenPort, interfaceName) ;
-					uint32_t rxSockBufferSize = 64*1024*1024 ;
-					if ( input_socket.SetRxBufferSize(rxSockBufferSize))
-					{
-						fprintf(stderr, "normStreamer failed to set input socket buffer size (%d)\n", rxSockBufferSize);
-						rval = false ;
-                    }
-				}
-			}
-		}
-	}
+			    else
+			    {
+				    fprintf(stderr, "%s:=>normStreamer joined group %s/%d on interface %s\n", __PRETTY_FUNCTION__,  groupAddr, listenPort, interfaceName) ;
+				    
+			    }
+		    }
+	    }
+    }
 	if ( rval )
 	    fprintf(stderr, "%s:=>listening on port %d on socket %d\n", __PRETTY_FUNCTION__, listenPort, (int)input_socket.GetHandle());
 	else
@@ -327,10 +335,13 @@ bool NormStreamer::Start(bool sender, bool receiver)
     unsigned int segmentSize = 1400;
     unsigned int blockSize = 64;
     unsigned int numParity = 0;
+    
+    unsigned int txSockBufferSize = 4*1024*1024;
+    unsigned int rxSockBufferSize = 6*1024*1024;
         
     if (receiver)
     {
-        NormPreallocateRemoteSender(norm_session, segmentSize, blockSize, numParity, bufferSize);
+        //NormPreallocateRemoteSender(norm_session, segmentSize, blockSize, numParity, bufferSize);
         if (!NormStartReceiver(norm_session, bufferSize))
         {
             fprintf(stderr, "normStreamer error: unable to start NORM receiver\n");
@@ -338,7 +349,7 @@ bool NormStreamer::Start(bool sender, bool receiver)
         }
 		if (0 != mlockall(MCL_CURRENT | MCL_FUTURE))
 		    fprintf(stderr, "normStreamer error: failed to lock memory for receiver.\n");
-        NormSetRxSocketBuffer(norm_session, 6*1024*1024);
+        NormSetRxSocketBuffer(norm_session, rxSockBufferSize);
         rx_needed = true;
         rx_ready = false;
     }
@@ -365,9 +376,9 @@ bool NormStreamer::Start(bool sender, bool receiver)
         }
         NormSetGrttEstimate(norm_session, 0.001);
         
-        //NormSetGrttMax(norm_session, 0.090);
+        NormSetGrttMax(norm_session, 0.090);
         //NormSetAutoParity(norm_session, 2);
-        NormSetTxSocketBuffer(norm_session, 4*1024*1024);
+        NormSetTxSocketBuffer(norm_session, txSockBufferSize);
         if (NORM_OBJECT_INVALID == (tx_stream = NormStreamOpen(norm_session, bufferSize)))
         {
             fprintf(stderr, "normStreamer error: unable to open NORM tx stream\n");
@@ -412,11 +423,11 @@ void NormStreamer::ReadInputSocket()
                 input_ready = false;
                 break;
             }
-            unsigned short msgSize = numBytes + MSG_HEADER_SIZE;
+            input_index = 0;
+            input_msg_length = numBytes + MSG_HEADER_SIZE;
+            unsigned short msgSize = input_msg_length;;
             msgSize = htons(msgSize);
             memcpy(input_buffer, &msgSize, MSG_HEADER_SIZE);
-            input_index = 0;
-            input_msg_length = numBytes;
             input_needed = false;
             if (TxReady()) SendData();
         }
@@ -591,7 +602,7 @@ void NormStreamer::SendData()
         }
         else
         {
-            fprintf(stderr, "SendData() impeded by flow control\n");
+            //fprintf(stderr, "SendData() impeded by flow control\n");
         }
     }  // end while (TxReady() && !input_needed)
 }  // end NormStreamer::SendData()
@@ -643,7 +654,7 @@ unsigned int NormStreamer::WriteToStream(const char* buffer, unsigned int numByt
     }
     if (bytesWritten != numBytes) //NormStreamWrite() was (at least partially) blocked
     {
-        fprintf(stderr, "NormStreamWrite() blocked by flow control ...\n");
+        //fprintf(stderr, "NormStreamWrite() blocked by flow control ...\n");
         tx_ready = false;
     }
     return bytesWritten;
@@ -982,7 +993,7 @@ void Usage()
 {
     fprintf(stderr, "Usage: normStreamer id <nodeId> {send | recv} [addr <addr>[/<port>]][ack <node1>[,<node2>,...]\n"
                     "                    [cc|cce|ccl|rate <bitsPerSecond>][interface <name>][debug <level>][trace]\n"
-                    "                    [listen [<mcastAddr>/]<port>][relay <dstAddr>/<port>]\n"
+                    "                    [listen [<mcastAddr>/]<port>][relay <dstAddr>/<port>][output <device>]\n"
                     "                    [debug <level>][trace][log <logfile>]\n"
                     "                    [omit][silent][txloss <lossFraction>]\n");
 }
@@ -1101,7 +1112,7 @@ int main(int argc, char* argv[])
             unsigned int relayPort = 0;
             if (i >= argc)
             {
-                fprintf(stderr, "normStreamer error: missing relay 'dstAddr/port]' value!\n");
+                fprintf(stderr, "normStreamer error: missing relay 'dstAddr/port' value!\n");
                 Usage();
                 return -1;
             }
@@ -1124,6 +1135,23 @@ int main(int argc, char* argv[])
             }
             // TBD - check addr/port validity?
             normStreamer.EnableUdpRelay(relayAddr, relayPort);
+        }
+        else if (0 == strncmp(cmd, "output", len))
+        {
+            if (i >= argc)
+            {
+                fprintf(stderr, "normStreamer error: missing output 'device' name!\n");
+                Usage();
+                return -1;
+            }
+            FILE* outfile = fopen(argv[i++], "w+");
+            if (NULL == outfile)
+            {
+                fprintf(stderr, "normStreamer output device fopen() error: %s\n", GetErrorString());
+                Usage();
+                return -1;
+            }
+            normStreamer.SetOutputFile(outfile);
         }
         else if (0 == strncmp(cmd, "id", len))
         {
