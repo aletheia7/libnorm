@@ -1,0 +1,3 @@
+[submodule "norm/protolib"]
+	path = norm/protolib
+	url = git@github.com:aletheia7/protolib.git
